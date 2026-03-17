@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>기업 컨센서스</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --card: #121a33;
+        --text: #e7ecff;
+        --muted: #aab4e6;
+        --line: rgba(255, 255, 255, 0.08);
+        --accent: #7aa2ff;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR",
+          "Apple SD Gothic Neo", "Malgun Gothic", Arial, sans-serif;
+        background: radial-gradient(1200px 600px at 10% 0%, rgba(122, 162, 255, 0.15), transparent 60%),
+          radial-gradient(900px 500px at 90% 10%, rgba(255, 122, 200, 0.12), transparent 55%),
+          var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 28px 18px 40px;
+      }
+      .top {
+        display: flex;
+        gap: 12px;
+        align-items: flex-end;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        letter-spacing: -0.2px;
+      }
+      .sub {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .card {
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        overflow: hidden;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .controls .sep {
+        width: 1px;
+        height: 28px;
+        background: var(--line);
+        margin: 0 2px;
+      }
+      .controls input {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        color: var(--text);
+        outline: none;
+        min-width: 260px;
+      }
+      .controls button {
+        background: rgba(122, 162, 255, 0.18);
+        border: 1px solid rgba(122, 162, 255, 0.35);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+        cursor: pointer;
+      }
+      .controls button:hover {
+        background: rgba(122, 162, 255, 0.26);
+      }
+      .controls button.secondary {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--line);
+      }
+      .controls button.secondary:hover {
+        background: rgba(255, 255, 255, 0.10);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      thead th {
+        cursor: pointer;
+        user-select: none;
+      }
+      thead th .sort {
+        opacity: 0.7;
+        margin-left: 6px;
+        font-size: 11px;
+      }
+      thead th.active {
+        color: var(--text);
+      }
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 8px;
+        text-align: right;
+        white-space: nowrap;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      th:nth-child(2),
+      td:nth-child(2) {
+        text-align: right;
+      }
+      thead th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+        margin-left: 8px;
+      }
+      .pos {
+        color: #8bffb1;
+      }
+      .neg {
+        color: #ff8bb0;
+      }
+      .foot {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .status strong {
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <h1>기업정보 · 컨센서스 <span class="pill">26년 적정주가 = PBR / PER × 100 × EPS</span></h1>
+          <div class="sub">국내 상장기업(주 1회 갱신) · 현재주가(네이버 등) · FnGuide 컨센서스(26년)</div>
+        </div>
+        <div class="controls">
+          <input id="q" placeholder="기업명/종목코드 검색 (예: 삼성전자 또는 005930)" />
+          <button id="reload">조회</button>
+          <div class="sep"></div>
+          <button id="refresh-one" class="secondary" title="현재 검색어로 1개 종목만 갱신">검색종목 갱신</button>
+          <button id="refresh-visible" class="secondary" title="현재 화면(검색 결과) 상위 50개를 갱신">표시된 50개 갱신</button>
+          <button id="refresh-companies" class="secondary" title="KIND 상장법인목록을 갱신">상장사목록 갱신</button>
+          <button id="fill-all" class="secondary" title="값이 비어있는 종목들을 백그라운드로 모두 채웁니다">전체 채우기</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th data-key="name" data-type="string">기업명 <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="current_price" data-type="number">현재주가 <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="pbr" data-type="number">PBR <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="per" data-type="number">PER <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="eps" data-type="number">EPS <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="fair_price" data-type="number">적정주가 <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="gap_ratio" data-type="number">괴리율 <span class="sort" aria-hidden="true"></span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="foot" id="meta">데이터를 불러오는 중…</div>
+        <div class="status" id="status"></div>
+      </div>
+    </div>
+
+    <script>
+      const fmtNum = (v) => (v === null || v === undefined ? "-" : Number(v).toLocaleString("ko-KR"));
+      const fmtFloat = (v) => (v === null || v === undefined ? "-" : Number(v).toFixed(2));
+      const fmtPct = (v) =>
+        v === null || v === undefined ? "-" : `${(Number(v) * 100).toFixed(2)}%`;
+
+      const statusEl = () => document.getElementById("status");
+      const setStatus = (msg) => {
+        statusEl().innerHTML = msg ? msg : "";
+      };
+
+      let __rows = [];
+      let __sort = { key: "name", dir: "asc", type: "string" };
+
+      async function postJson(url) {
+        const res = await fetch(url, { method: "POST" });
+        let body = null;
+        try {
+          body = await res.json();
+        } catch (e) {}
+        if (!res.ok) {
+          const detail = body?.detail ? ` (${body.detail})` : "";
+          throw new Error(`요청 실패: ${res.status}${detail}`);
+        }
+        return body;
+      }
+
+      function applySort(rows) {
+        const { key, dir, type } = __sort;
+        const mult = dir === "asc" ? 1 : -1;
+
+        const norm = (v) => (v === null || v === undefined ? null : v);
+
+        const get = (r) => norm(r[key]);
+        const cmp = (a, b) => {
+          const av = get(a);
+          const bv = get(b);
+          if (av === null && bv === null) return 0;
+          if (av === null) return 1; // null은 뒤로
+          if (bv === null) return -1;
+          if (type === "number") return (Number(av) - Number(bv)) * mult;
+          return String(av).localeCompare(String(bv), "ko") * mult;
+        };
+
+        return [...rows].sort(cmp);
+      }
+
+      function render() {
+        const sorted = applySort(__rows);
+        document.getElementById("rows").innerHTML = sorted.map(rowHtml).join("");
+        // meta는 load()에서 갱신
+      }
+
+      function updateSortIndicators() {
+        document.querySelectorAll("thead th").forEach((th) => {
+          th.classList.remove("active");
+          const s = th.querySelector(".sort");
+          if (s) s.textContent = "";
+        });
+        const th = document.querySelector(`thead th[data-key="${__sort.key}"]`);
+        if (th) {
+          th.classList.add("active");
+          const s = th.querySelector(".sort");
+          if (s) s.textContent = __sort.dir === "asc" ? "▲" : "▼";
+        }
+      }
+
+      function rowHtml(r) {
+        const gap = r.gap_ratio;
+        const cls = gap === null || gap === undefined ? "" : gap >= 0 ? "pos" : "neg";
+        return `
+          <tr>
+            <td>${r.name} <span class="pill">${r.ticker}</span></td>
+            <td>${fmtNum(r.current_price)}</td>
+            <td>${fmtFloat(r.pbr)}</td>
+            <td>${fmtFloat(r.per)}</td>
+            <td>${fmtNum(r.eps)}</td>
+            <td>${fmtNum(r.fair_price)}</td>
+            <td class="${cls}">${fmtPct(r.gap_ratio)}</td>
+          </tr>
+        `;
+      }
+
+      async function load() {
+        const q = document.getElementById("q").value.trim();
+        const res = await fetch(`/api/rows?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        __rows = data.rows || [];
+        updateSortIndicators();
+        render();
+        document.getElementById("meta").textContent = `표시: ${data.rows.length}개 (총 ${data.total}개) · 기준일: ${data.asof ?? "-"}`;
+      }
+
+      document.getElementById("reload").addEventListener("click", load);
+      document.getElementById("q").addEventListener("input", () => {
+        window.clearTimeout(window.__t);
+        window.__t = window.setTimeout(load, 250);
+      });
+
+      document.querySelectorAll("thead th[data-key]").forEach((th) => {
+        th.addEventListener("click", () => {
+          const key = th.getAttribute("data-key");
+          const type = th.getAttribute("data-type") || "string";
+          if (__sort.key === key) {
+            __sort.dir = __sort.dir === "asc" ? "desc" : "asc";
+          } else {
+            __sort = { key, dir: "asc", type };
+          }
+          updateSortIndicators();
+          render();
+        });
+      });
+
+      document.getElementById("refresh-companies").addEventListener("click", async () => {
+        setStatus("<strong>상장사목록</strong> 갱신 중…");
+        try {
+          const r = await postJson("/api/admin/refresh/companies");
+          setStatus(`<strong>상장사목록</strong> 갱신 완료: ${r.count}개 (업서트 ${r.upserts}개) · ${r.asof}`);
+          await load();
+        } catch (e) {
+          setStatus(`<strong>상장사목록</strong> 갱신 실패: ${e.message}`);
+        }
+      });
+
+      document.getElementById("refresh-one").addEventListener("click", async () => {
+        const q = document.getElementById("q").value.trim();
+        if (!q) {
+          setStatus("검색어를 입력해주세요. (기업명 또는 종목코드)");
+          return;
+        }
+        setStatus(`<strong>${q}</strong> 스냅샷 갱신 중… (현재가/컨센서스)`);
+        try {
+          const r = await postJson(`/api/admin/refresh/snapshot_by_query?q=${encodeURIComponent(q)}`);
+          setStatus(
+            `<strong>${r.ticker}</strong> 갱신 완료 · 현재가 ${fmtNum(r.current_price)} · PBR ${fmtFloat(
+              r.pbr_26y
+            )} · PER ${fmtFloat(r.per_26y)} · EPS ${fmtNum(r.eps_26y)}`
+          );
+          await load();
+        } catch (e) {
+          setStatus(`<strong>${q}</strong> 갱신 실패: ${e.message}`);
+        }
+      });
+
+      document.getElementById("refresh-visible").addEventListener("click", async () => {
+        const q = document.getElementById("q").value.trim();
+        setStatus(`<strong>${q || "전체"}</strong> 표시된 항목(최대 50개) 갱신 중…`);
+        try {
+          const r = await postJson(`/api/admin/refresh/visible?q=${encodeURIComponent(q)}&limit=50`);
+          setStatus(
+            `<strong>${q || "전체"}</strong> 갱신 완료: 요청 ${r.requested}개 · 성공 ${r.ok} · 실패 ${r.fail}`
+          );
+          await load();
+        } catch (e) {
+          setStatus(`<strong>${q || "전체"}</strong> 갱신 실패: ${e.message}`);
+        }
+      });
+
+      document.getElementById("fill-all").addEventListener("click", async () => {
+        const q = document.getElementById("q").value.trim();
+        setStatus(`<strong>${q || "전체"}</strong> 값 채우기 시작… (백그라운드)`);
+        try {
+          const start = await postJson(
+            `/api/admin/fill?q=${encodeURIComponent(q)}&limit=2000&only_missing=true`
+          );
+          const jobId = start.job_id;
+          setStatus(
+            `<strong>${q || "전체"}</strong> 채우기 실행됨: ${start.requested}개 대상 · 진행률 확인 중…`
+          );
+
+          const poll = async () => {
+            const res = await fetch(`/api/admin/fill/${encodeURIComponent(jobId)}`);
+            const st = await res.json();
+            const pct =
+              st.requested > 0 ? `${Math.floor((st.done / st.requested) * 100)}%` : "100%";
+            const tail = st.last_ticker ? ` · 최근: ${st.last_ticker}` : "";
+            const doneMsg = `<strong>${q || "전체"}</strong> 채우기: ${pct} (${st.done}/${st.requested}) · 성공 ${st.ok} · 실패 ${st.fail}${tail}`;
+            setStatus(doneMsg);
+            if (st.finished_at) {
+              await load();
+              return;
+            }
+            window.setTimeout(poll, 1500);
+          };
+          poll();
+        } catch (e) {
+          setStatus(`<strong>${q || "전체"}</strong> 채우기 시작 실패: ${e.message}`);
+        }
+      });
+
+      load();
+    </script>
+  </body>
+</html>
+
