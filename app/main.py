@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="consensus", lifespan=lifespan)
+app = FastAPI(title="kr-analyze", lifespan=lifespan)
 app.include_router(api_router)
 
 

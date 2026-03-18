@@ -13,6 +13,8 @@ class KindCompanyRow:
     ticker: str
     name: str
     market: str | None
+    category_l: str | None  # 업종구분(대분류 느낌)
+    category_m: str | None  # 산업/업종(좀 더 상세)
 
 
 def _market_normalize(raw: str) -> str | None:
@@ -66,12 +68,15 @@ def parse_corp_list(html: str) -> list[KindCompanyRow]:
     best = max(tables, key=lambda t: len(t.find_all("tr")))
     for tr in best.find_all("tr"):
         tds = tr.find_all("td")
+        # 기본적으로 10컬럼: 회사명/시장구분/종목코드/업종/주요제품/상장일/결산월/대표자명/홈페이지/지역
         if len(tds) < 3:
             continue
 
         name = tds[0].get_text(strip=True)
         market_raw = tds[1].get_text(strip=True)
         ticker = tds[2].get_text(strip=True)
+        category_l = tds[3].get_text(strip=True) if len(tds) >= 4 else ""
+        category_m = tds[4].get_text(strip=True) if len(tds) >= 5 else ""
 
         if not ticker.isdigit():
             continue
@@ -84,6 +89,8 @@ def parse_corp_list(html: str) -> list[KindCompanyRow]:
                 ticker=ticker,
                 name=name,
                 market=_market_normalize(market_raw),
+                category_l=(category_l or "").strip() or None,
+                category_m=(category_m or "").strip() or None,
             )
         )
 
