@@ -11,14 +11,14 @@ A web dashboard that calculates the fair value of KRX-listed stocks using FnGuid
 
 Pulls FnGuide 2026 consensus data (PBR/PER/EPS) for all KRX-listed companies, calculates a fair value price, then shows the gap against the current market price in a searchable table.
 
-Fair value formula: `PBR × PER × EPS`
+Fair value formula: `(PBR / PER) × 100 × EPS`
 
 | Column | Description |
 |---|---|
 | Company | KRX-listed stock |
 | Current price | Real-time from Naver Finance |
 | PBR / PER / EPS | FnGuide 2026 consensus |
-| Fair value | PBR × PER × EPS |
+| Fair value | (PBR / PER) × 100 × EPS |
 | Gap ratio | (Fair value − Current price) / Current price |
 
 ---

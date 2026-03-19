@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 import httpx
+from sqlalchemy import text
 from sqlmodel import Session, col, func, select
 
 from app.db import get_session, init_db
@@ -22,6 +23,50 @@ from app.services.bulk import get_bulk_status, start_bulk_consensus_fill, start_
 
 
 router = APIRouter(prefix="/api")
+
+# SQLite SQLITE_MAX_VARIABLE_NUMBER(구버전 999) 대비
+_SNAPSHOT_IN_CHUNK = 400
+
+
+def _fetch_latest_snapshots_by_ticker(session: Session, *, asof: str, tickers: list[str]) -> dict[str, Snapshot]:
+    """
+    오늘(asof) 기준 티커당 스냅샷 1건만 선택.
+    - 값이 있는 행(가격/26y 지표 중 하나라도 NOT NULL)을 우선
+    - 그다음 created_at DESC
+    기존 구현은 동일 조건의 행을 전부 읽어와 Python에서 골랐기 때문에,
+    스냅샷이 많이 쌓이면 /api/rows가 매우 느려질 수 있음.
+    """
+    if not tickers:
+        return {}
+    all_ids: list[int] = []
+    for start in range(0, len(tickers), _SNAPSHOT_IN_CHUNK):
+        chunk = tickers[start : start + _SNAPSHOT_IN_CHUNK]
+        placeholders = ", ".join([f":t{i}" for i in range(len(chunk))])
+        params: dict = {"asof": asof}
+        for i, t in enumerate(chunk):
+            params[f"t{i}"] = t
+        sql = f"""
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ticker
+                   ORDER BY
+                     (CASE WHEN current_price IS NOT NULL OR pbr_26y IS NOT NULL
+                                OR per_26y IS NOT NULL OR eps_26y IS NOT NULL
+                           THEN 0 ELSE 1 END),
+                     created_at DESC
+                 ) AS rn
+          FROM snapshot
+          WHERE asof = :asof AND ticker IN ({placeholders})
+        )
+        SELECT id FROM ranked WHERE rn = 1
+        """
+        result = session.execute(text(sql), params)
+        all_ids.extend(row[0] for row in result.fetchall())
+    if not all_ids:
+        return {}
+    snaps = session.exec(select(Snapshot).where(Snapshot.id.in_(all_ids))).all()
+    return {s.ticker: s for s in snaps}
 
 
 @router.get("/rows")
@@ -77,6 +122,8 @@ def rows(
         # -> 지표 정렬일 때는 서버에서 정렬 후 상위 limit개를 반환한다.
         needs_server_sort = sort_key in {
             "name",
+            "category_l",
+            "category_m",
             "current_price",
             "pbr",
             "per",
@@ -84,38 +131,37 @@ def rows(
             "fair_price",
             "gap_ratio",
         }
-        # 지표 정렬은 전체(또는 충분히 큰) 후보에서 계산 후 잘라야 "전체 기준 상위"가 나온다.
-        candidate_limit = page_size
-        if needs_server_sort and sort_key != "name":
+        # 빠른 경로: 단순 컬럼 정렬(이름/카테고리)은 DB에서 offset/limit로 페이지네이션 처리
+        if sort_key in {"name", "category_l", "category_m"}:
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            if page > total_pages:
+                page = total_pages
+            off = (page - 1) * page_size
+            order_expr = Company.name
+            if sort_key == "category_l":
+                order_expr = Company.category_l
+            elif sort_key == "category_m":
+                order_expr = Company.category_m
+            if sort_dir == "desc":
+                order_expr = order_expr.desc()
+            companies = session.exec(base.order_by(order_expr, Company.name).offset(off).limit(page_size)).all()
+        else:
+            # 지표 정렬은 전체(또는 충분히 큰) 후보에서 계산 후 잘라야 "전체 기준 상위"가 나온다.
+            candidate_limit = page_size
             # KRX 전체가 2천여개 수준이라 전부 계산해도 부담이 크지 않음 (안전 상한 5000)
             candidate_limit = min(max(int(total), int(page_size)), 5000)
-        else:
-            # 이름 정렬은 DB에서 limit/offset로 처리 가능하지만, 여기선 단순성을 위해 동일 경로 유지
-            candidate_limit = min(max(int(total), int(page_size) * 20), 5000)
+            companies = session.exec(base.order_by(Company.name).limit(candidate_limit)).all()
 
-        companies = session.exec(base.order_by(Company.name).limit(candidate_limit)).all()
+        # 성능: 기존에는 회사마다 Snapshot을 별도 쿼리로 조회(N+1)해서 느렸음.
+        # 오늘(asof) 스냅샷을 한 번에 가져와 ticker별로 선택한다.
+        tickers = [c.ticker for c in companies]
+        snaps_by_ticker: dict[str, Snapshot] = {}
+        if tickers:
+            snaps_by_ticker = _fetch_latest_snapshots_by_ticker(session, asof=today, tickers=tickers)
 
         out = []
         for c in companies:
-            # 갱신을 여러 번 시도하다가 실패하면 "값이 비어있는 스냅샷"이 최신으로 저장될 수 있음.
-            # UI에서는 가능한 한 "값이 있는 최신 스냅샷"을 우선 사용한다.
-            base = (
-                select(Snapshot)
-                .where(Snapshot.ticker == c.ticker)
-                .where(Snapshot.asof == today)
-                .order_by(Snapshot.created_at.desc())
-            )
-
-            snap = session.exec(
-                base.where(
-                    (Snapshot.current_price.is_not(None))
-                    | (Snapshot.pbr_26y.is_not(None))
-                    | (Snapshot.per_26y.is_not(None))
-                    | (Snapshot.eps_26y.is_not(None))
-                ).limit(1)
-            ).first()
-            if not snap:
-                snap = session.exec(base.limit(1)).first()
+            snap = snaps_by_ticker.get(c.ticker)
 
             current_price: Optional[int] = None
             # UI에서 year 선택을 지원하기 위해, year별 값을 내려줌
@@ -217,13 +263,14 @@ def rows(
 
                 out.sort(key=key_generic)
 
-        # 페이지 슬라이스 (None은 항상 뒤로 정렬된 상태)
+        # 페이지 슬라이스: 지표 정렬 경로에서만 필요 (단순 컬럼 정렬은 이미 DB에서 paging 처리됨)
         total_pages = max(1, (total + page_size - 1) // page_size)
-        if page > total_pages:
-            page = total_pages
-        start = (page - 1) * page_size
-        end = start + page_size
-        out = out[start:end]
+        if sort_key not in {"name", "category_l", "category_m"}:
+            if page > total_pages:
+                page = total_pages
+            start = (page - 1) * page_size
+            end = start + page_size
+            out = out[start:end]
 
         return {
             "rows": out,
