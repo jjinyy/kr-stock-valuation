@@ -170,7 +170,11 @@
       }
       th:nth-child(2),
       td:nth-child(2) {
-        text-align: right;
+        text-align: left;
+      }
+      th:nth-child(3),
+      td:nth-child(3) {
+        text-align: left;
       }
       thead th {
         color: var(--muted);
@@ -306,6 +310,8 @@
         <table>
           <thead>
             <tr>
+              <th data-key="category_l" data-type="string">업종 <span class="sort" aria-hidden="true"></span></th>
+              <th data-key="category_m" data-type="string">주요제품 <span class="sort" aria-hidden="true"></span></th>
               <th data-key="name" data-type="string">기업명 <span class="sort" aria-hidden="true"></span></th>
               <th data-key="current_price" data-type="number">현재주가 <span class="sort" aria-hidden="true"></span></th>
               <th data-key="pbr" data-type="number">PBR <span class="sort" aria-hidden="true"></span></th>
@@ -453,14 +459,15 @@
       function rowHtml(r) {
         const gap = r.gap_ratio;
         const cls = gap === null || gap === undefined ? "" : gap >= 0 ? "pos" : "neg";
-        const pick = (r.category_m || r.category_l || "").trim();
-        const short = pick.length > 14 ? `${pick.slice(0, 14)}…` : pick;
-        const catHtml = short
-          ? `<span class="pill" style="margin-left:0; margin-right:8px;" title="${pick}">${short}</span>`
-          : "";
+        const catL = (r.category_l || "").trim();
+        const catM = (r.category_m || "").trim();
+        const catLShort = catL.length > 14 ? `${catL.slice(0, 14)}…` : catL;
+        const catMShort = catM.length > 18 ? `${catM.slice(0, 18)}…` : catM;
         return `
           <tr>
-            <td>${catHtml}${r.name} <span class="pill">${r.ticker}</span></td>
+            <td title="${catL}">${catL ? catLShort : "-"}</td>
+            <td title="${catM}">${catM ? catMShort : "-"}</td>
+            <td>${r.name} <span class="pill">${r.ticker}</span></td>
             <td>${fmtNum(r.current_price)}</td>
             <td>${fmtFloat(r.pbr)}</td>
             <td>${fmtFloat(r.per)}</td>
@@ -510,8 +517,14 @@
 
       document.getElementById("reload").addEventListener("click", load);
       document.getElementById("q").addEventListener("input", () => {
+        const v = document.getElementById("q").value.trim();
         window.clearTimeout(window.__t);
         __page = 1;
+        // 검색어가 비워지면 즉시 "전체"로 복귀
+        if (!v) {
+          load();
+          return;
+        }
         window.__t = window.setTimeout(load, 250);
       });
 
