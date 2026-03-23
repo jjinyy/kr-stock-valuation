@@ -287,6 +287,7 @@
           <button id="refresh-one-price" class="secondary" title="현재 검색어로 1개 종목의 현재가만 갱신">현재가 갱신</button>
           <button id="refresh-one-consensus" class="secondary" title="현재 검색어로 1개 종목의 컨센서스만 갱신">컨센서스 갱신</button>
           <button id="toggle-advanced" class="secondary" title="고급 작업(대량 갱신/채우기) 보기">고급</button>
+          <button id="toggle-top5-news" class="secondary" title="괴리율 양수 상위 5개 종목의 최신 뉴스 보기">상위 5개 뉴스</button>
         </div>
       </div>
 
@@ -306,6 +307,22 @@
           <div class="foot">
             고급 작업은 외부 호출이 많아 느릴 수 있어요. 평소에는 <span class="kbd">현재가 갱신</span> / <span class="kbd">컨센서스 갱신</span>만으로 충분합니다.
           </div>
+        </div>
+        <div id="top5-news" style="display:none; margin-bottom: 10px;">
+          <div class="mini" style="margin-bottom: 8px;">괴리율 양수 상위 5개 기업의 최신 기사(기업당 최대 10개)</div>
+          <table>
+            <thead>
+              <tr>
+                <th>기업명</th>
+                <th>키워드</th>
+                <th>뉴스 제목</th>
+                <th>긍정/부정</th>
+                <th>언론사</th>
+                <th>일자</th>
+              </tr>
+            </thead>
+            <tbody id="top5-news-rows"></tbody>
+          </table>
         </div>
         <table>
           <thead>
@@ -374,6 +391,7 @@
       let __pageSize = 200;
       let __total = 0;
       let __totalPages = 1;
+      let __showTop5News = false;
 
       const baseYearEl = () => document.getElementById("base-year");
       const yearEl = () => document.getElementById("year");
@@ -512,6 +530,46 @@
           document.getElementById("rows").innerHTML = "";
           document.getElementById("meta").textContent = "데이터를 불러오지 못했습니다.";
           setStatus(`<strong>로드 실패</strong>: ${e.message}`);
+        }
+      }
+
+      function newsRowHtml(r) {
+        const sentimentCls = r.sentiment === "긍정" ? "pos" : r.sentiment === "부정" ? "neg" : "";
+        const title = (r.title || "").trim();
+        const safeTitle = title || "-";
+        const href = r.link && r.link !== "-" ? r.link : "";
+        return `
+          <tr>
+            <td>${r.company_name || "-"}</td>
+            <td>${r.keyword || "기타"}</td>
+            <td>${href ? `<a href="${href}" target="_blank" rel="noopener noreferrer" style="color: var(--text); text-decoration: underline;">${safeTitle}</a>` : safeTitle}</td>
+            <td class="${sentimentCls}">${r.sentiment || "-"}</td>
+            <td>${r.press || "-"}</td>
+            <td>${r.date || "-"}</td>
+          </tr>
+        `;
+      }
+
+      async function loadTop5News() {
+        const tbody = document.getElementById("top5-news-rows");
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">뉴스를 불러오는 중…</td></tr>`;
+        try {
+          const res = await fetch(
+            `/api/top5-news?base_year=${encodeURIComponent(__baseYear)}&per_company=10`
+          );
+          if (!res.ok) {
+            const t = await res.text();
+            throw new Error(`API 오류: ${res.status} ${t.slice(0, 120)}`);
+          }
+          const data = await res.json();
+          const rows = data.rows || [];
+          if (!rows.length) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">표시할 뉴스가 없습니다.</td></tr>`;
+            return;
+          }
+          tbody.innerHTML = rows.map(newsRowHtml).join("");
+        } catch (e) {
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">뉴스를 불러오지 못했습니다. (${e.message})</td></tr>`;
         }
       }
 
@@ -750,6 +808,15 @@
         const el = document.getElementById("advanced");
         const on = el.style.display !== "none";
         el.style.display = on ? "none" : "block";
+      });
+
+      document.getElementById("toggle-top5-news").addEventListener("click", async () => {
+        __showTop5News = !__showTop5News;
+        const el = document.getElementById("top5-news");
+        el.style.display = __showTop5News ? "block" : "none";
+        if (__showTop5News) {
+          await loadTop5News();
+        }
       });
 
       document.getElementById("prev").addEventListener("click", async () => {
