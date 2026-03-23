@@ -20,6 +20,7 @@ from app.services.jobs import (
     refresh_snapshots_for_all,
 )
 from app.services.bulk import get_bulk_status, start_bulk_consensus_fill, start_bulk_fill, start_bulk_price_fill
+from app.services.news import fetch_company_news, group_similar_news
 
 
 router = APIRouter(prefix="/api")
@@ -285,6 +286,90 @@ def rows(
             "page_size": page_size,
             "total_pages": total_pages,
         }
+
+
+@router.get("/top5-news")
+def top5_news(base_year: int | None = None, per_company: int = 10):
+    init_db()
+    today = date.today().isoformat()
+    if base_year is None:
+        base_year = date.today().year
+    per_company = max(1, min(int(per_company), 20))
+
+    with get_session() as session:
+        companies = session.exec(select(Company).order_by(Company.name).limit(5000)).all()
+        tickers = [c.ticker for c in companies]
+        snaps_by_ticker = _fetch_latest_snapshots_by_ticker(session, asof=today, tickers=tickers)
+
+    scored: list[dict] = []
+    by_ticker = {c.ticker: c for c in companies}
+    for ticker in tickers:
+        c = by_ticker[ticker]
+        snap = snaps_by_ticker.get(ticker)
+        if not snap:
+            continue
+        current_price = snap.current_price
+        if current_price is None:
+            continue
+
+        pbr = None
+        per = None
+        eps = None
+        if snap.consensus_json:
+            try:
+                raw = json.loads(snap.consensus_json)
+                yv = raw.get(str(base_year), {}) if isinstance(raw, dict) else {}
+                pbr = yv.get("pbr")
+                per = yv.get("per")
+                eps = yv.get("eps")
+            except Exception:
+                pbr = snap.pbr_26y
+                per = snap.per_26y
+                eps = snap.eps_26y
+        else:
+            pbr = snap.pbr_26y
+            per = snap.per_26y
+            eps = snap.eps_26y
+
+        calc = calc_fair_price_and_gap(current_price=current_price, pbr=pbr, per=per, eps=eps)
+        if calc.gap_ratio is None or calc.gap_ratio <= 0:
+            continue
+        scored.append(
+            {
+                "ticker": c.ticker,
+                "name": c.name,
+                "gap_ratio": calc.gap_ratio,
+            }
+        )
+
+    top5 = sorted(scored, key=lambda x: x["gap_ratio"], reverse=True)[:5]
+    rows_out: list[dict] = []
+    for item in top5:
+        try:
+            news = fetch_company_news(ticker=item["ticker"], limit=per_company * 2)
+            news = group_similar_news(news)
+        except Exception:
+            news = []
+        for n in news[:per_company]:
+            rows_out.append(
+                {
+                    "ticker": item["ticker"],
+                    "company_name": item["name"],
+                    "title": n["title"],
+                    "link": n["link"],
+                    "sentiment": n["sentiment"],
+                    "keyword": n.get("keyword") or "기타",
+                    "press": n["press"],
+                    "date": n["date"],
+                    "count": n.get("count") or 1,
+                }
+            )
+
+    return {
+        "base_year": base_year,
+        "companies": top5,
+        "rows": rows_out,
+    }
 
 
 @router.post("/admin/refresh/companies")
