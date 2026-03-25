@@ -454,7 +454,9 @@ def admin_refresh_consensus_by_query(q: str, primary_year: int | None = None):
 
     if not c:
         raise HTTPException(status_code=404, detail="company not found")
-    return refresh_consensus_for_ticker(ticker=c.ticker, primary_year=primary_year)
+    return refresh_consensus_for_ticker(
+        ticker=c.ticker, primary_year=primary_year, skip_if_already_today=True
+    )
 
 
 @router.post("/admin/refresh/snapshots")

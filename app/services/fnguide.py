@@ -24,6 +24,15 @@ class MainInfo:
 
 _RE_NUM = re.compile(r"[-+]?\d+(?:,\d+)*(?:\.\d+)?")
 _RE_YEAR = re.compile(r"\b(\d{4}/\d{2}(?:\([A-Z]\))?)\b")
+_DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://comp.fnguide.com/",
+}
+_CLIENT = httpx.Client(
+    timeout=httpx.Timeout(12.0, connect=4.0),
+    follow_redirects=True,
+    limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
+)
 
 
 def _to_float(text: str) -> Optional[float]:
@@ -53,18 +62,22 @@ def _extract_year_token(cell_text: str) -> str:
     return cell_text
 
 
-def fetch_fnguide_main_html(*, ticker: str, timeout_s: int = 30) -> str:
+def fetch_fnguide_main_html(*, ticker: str, timeout_s: int = 12) -> str:
     ticker = ticker.zfill(6)
     # gicode: A + 6자리
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode=A{ticker}&MenuYn=Y&NewMenuID=11"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://comp.fnguide.com/",
-    }
-    with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
-        resp = client.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp.text
+    # 일시적인 네트워크 오류 대응: 1회 재시도
+    last_err: Exception | None = None
+    for _ in range(2):
+        try:
+            resp = _CLIENT.get(url, headers=_DEFAULT_HEADERS, timeout=timeout_s)
+            resp.raise_for_status()
+            return resp.text
+        except httpx.HTTPError as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    return ""
 
 
 def _norm_space(s: str) -> str:

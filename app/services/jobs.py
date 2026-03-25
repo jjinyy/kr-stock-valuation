@@ -23,6 +23,15 @@ def _latest_snapshot_today(session, *, ticker: str, today: str) -> Snapshot | No
     ).first()
 
 
+def _get_or_create_today_snapshot(session, *, ticker: str, today: str) -> Snapshot:
+    snap = _latest_snapshot_today(session, ticker=ticker, today=today)
+    if snap:
+        return snap
+    snap = Snapshot(ticker=ticker, asof=today)
+    session.add(snap)
+    return snap
+
+
 def refresh_companies_from_kind() -> dict:
     init_db()
     rows, asof = fetch_kind_companies()
@@ -64,8 +73,9 @@ def refresh_companies_from_kind() -> dict:
     return {"asof": asof, "count": len(rows), "upserts": upserts}
 
 
-def refresh_snapshot_for_ticker(*, ticker: str) -> dict:
-    init_db()
+def refresh_snapshot_for_ticker(*, ticker: str, ensure_init: bool = True) -> dict:
+    if ensure_init:
+        init_db()
     ticker = ticker.zfill(6)
     today = date.today().isoformat()
     primary_year = date.today().year
@@ -108,19 +118,15 @@ def refresh_snapshot_for_ticker(*, ticker: str) -> dict:
     consensus_json = to_json(consensus_years)
     consensus_payload = json.loads(consensus_json) if consensus_json else None
 
-    snap = Snapshot(
-        ticker=ticker,
-        asof=today,
-        current_price=current_price,
-        # 기존 컬럼은 "현재 선택 기본값(=올해)"로 채워서 UI/로직 호환
-        pbr_26y=getattr(primary, "pbr", None) if primary else None,
-        per_26y=getattr(primary, "per", None) if primary else None,
-        eps_26y=getattr(primary, "eps", None) if primary else None,
-        consensus_json=consensus_json,
-        consensus_primary_year=primary_year,
-    )
     with get_session() as session:
-        session.add(snap)
+        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+        snap.current_price = current_price
+        # 기존 컬럼은 "현재 선택 기본값(=올해)"로 채워서 UI/로직 호환
+        snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
+        snap.per_26y = getattr(primary, "per", None) if primary else None
+        snap.eps_26y = getattr(primary, "eps", None) if primary else None
+        snap.consensus_json = consensus_json
+        snap.consensus_primary_year = primary_year
         session.commit()
 
         # company may not exist yet; keep it as-is
@@ -138,11 +144,12 @@ def refresh_snapshot_for_ticker(*, ticker: str) -> dict:
     }
 
 
-def refresh_price_for_ticker(*, ticker: str) -> dict:
+def refresh_price_for_ticker(*, ticker: str, ensure_init: bool = True) -> dict:
     """
     네이버 현재가만 갱신합니다. (컨센서스는 기존 저장값을 재사용)
     """
-    init_db()
+    if ensure_init:
+        init_db()
     ticker = ticker.zfill(6)
     today = date.today().isoformat()
 
@@ -166,17 +173,13 @@ def refresh_price_for_ticker(*, ticker: str) -> dict:
             per = prev.per_26y
             eps = prev.eps_26y
 
-        snap = Snapshot(
-            ticker=ticker,
-            asof=today,
-            current_price=current_price,
-            pbr_26y=pbr,
-            per_26y=per,
-            eps_26y=eps,
-            consensus_json=consensus_json,
-            consensus_primary_year=consensus_primary_year,
-        )
-        session.add(snap)
+        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+        snap.current_price = current_price
+        snap.pbr_26y = pbr
+        snap.per_26y = per
+        snap.eps_26y = eps
+        snap.consensus_json = consensus_json
+        snap.consensus_primary_year = consensus_primary_year
         session.commit()
 
     return {
@@ -187,15 +190,49 @@ def refresh_price_for_ticker(*, ticker: str) -> dict:
     }
 
 
-def refresh_consensus_for_ticker(*, ticker: str, primary_year: int | None = None) -> dict:
+def refresh_consensus_for_ticker(
+    *,
+    ticker: str,
+    primary_year: int | None = None,
+    ensure_init: bool = True,
+    skip_if_already_today: bool = False,
+) -> dict:
     """
     FnGuide 컨센서스만 갱신합니다. (현재가는 기존 저장값을 재사용)
     """
-    init_db()
+    if ensure_init:
+        init_db()
     ticker = ticker.zfill(6)
     today = date.today().isoformat()
     if primary_year is None:
         primary_year = date.today().year
+
+    # 단건 액션에서 "일 1회면 충분" 정책을 원할 때, 오늘 조회된 컨센서스는 재조회 생략
+    with get_session() as session:
+        prev = _latest_snapshot_today(session, ticker=ticker, today=today)
+        if skip_if_already_today and prev and (
+            prev.consensus_json
+            or prev.pbr_26y is not None
+            or prev.per_26y is not None
+            or prev.eps_26y is not None
+        ):
+            payload = None
+            if prev.consensus_json:
+                try:
+                    raw = json.loads(prev.consensus_json)
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:
+                    payload = None
+            return {
+                "ticker": ticker,
+                "asof": today,
+                "current_price": prev.current_price,
+                "consensus_years": payload,
+                "consensus_primary_year": int(primary_year),
+                "errors": [],
+                "skipped": True,
+            }
 
     errors: list[str] = []
     consensus_years: dict[int, object] | None = None
@@ -230,17 +267,13 @@ def refresh_consensus_for_ticker(*, ticker: str, primary_year: int | None = None
         if prev:
             current_price = prev.current_price
 
-        snap = Snapshot(
-            ticker=ticker,
-            asof=today,
-            current_price=current_price,
-            pbr_26y=getattr(primary, "pbr", None) if primary else None,
-            per_26y=getattr(primary, "per", None) if primary else None,
-            eps_26y=getattr(primary, "eps", None) if primary else None,
-            consensus_json=consensus_json,
-            consensus_primary_year=int(primary_year),
-        )
-        session.add(snap)
+        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+        snap.current_price = current_price
+        snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
+        snap.per_26y = getattr(primary, "per", None) if primary else None
+        snap.eps_26y = getattr(primary, "eps", None) if primary else None
+        snap.consensus_json = consensus_json
+        snap.consensus_primary_year = int(primary_year)
         session.commit()
 
     return {
@@ -250,6 +283,7 @@ def refresh_consensus_for_ticker(*, ticker: str, primary_year: int | None = None
         "consensus_years": payload,
         "consensus_primary_year": int(primary_year),
         "errors": errors,
+        "skipped": False,
     }
 
 

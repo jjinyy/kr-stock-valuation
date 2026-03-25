@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from threading import Lock, Thread
@@ -28,6 +29,7 @@ class BulkStatus:
 
 _lock = Lock()
 _jobs: dict[str, BulkStatus] = {}
+_MAX_BULK_WORKERS = 6
 
 
 def _has_today_snapshot_with_values(session: Session, *, ticker: str, today: str) -> bool:
@@ -116,11 +118,11 @@ def start_bulk_fill(*, q: str = "", limit: int = 2000, only_missing: bool = True
         ok = 0
         fail = 0
         done = 0
-        last = None
-        for t in tickers:
-            last = t
+        workers = max(1, min(_MAX_BULK_WORKERS, len(tickers)))
+
+        def run_one(t: str) -> tuple[str, bool]:
             try:
-                r = refresh_snapshot_for_ticker(ticker=t)
+                r = refresh_snapshot_for_ticker(ticker=t, ensure_init=False)
                 # "컨센서스가 원래 없음"은 실패로 보지 않음.
                 # - 현재가가 없으면 실패
                 # - 컨센서스(PBR/PER/EPS)가 전부 없더라도, fnguide 호출 자체가 실패한 경우에만 실패로 카운트
@@ -131,23 +133,27 @@ def start_bulk_fill(*, q: str = "", limit: int = 2000, only_missing: bool = True
                     r.get("pbr_26y") is None and r.get("per_26y") is None and r.get("eps_26y") is None
                 )
                 fnguide_failed = any(str(e).startswith("fnguide:") for e in errors)
-
-                if not has_price:
-                    fail += 1
-                elif (not has_any_consensus) and fnguide_failed:
-                    fail += 1
-                else:
-                    ok += 1
+                is_ok = has_price and not ((not has_any_consensus) and fnguide_failed)
+                return (t, is_ok)
             except Exception:
-                fail += 1
-            done += 1
-            with _lock:
-                s = _jobs.get(job_id)
-                if s:
-                    s.done = done
-                    s.ok = ok
-                    s.fail = fail
-                    s.last_ticker = last
+                return (t, False)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(run_one, t) for t in tickers]
+            for fut in as_completed(futures):
+                t, is_ok = fut.result()
+                if is_ok:
+                    ok += 1
+                else:
+                    fail += 1
+                done += 1
+                with _lock:
+                    s = _jobs.get(job_id)
+                    if s:
+                        s.done = done
+                        s.ok = ok
+                        s.fail = fail
+                        s.last_ticker = t
         with _lock:
             s = _jobs.get(job_id)
             if s:
@@ -194,25 +200,31 @@ def start_bulk_price_fill(*, q: str = "", limit: int = 2000) -> BulkStatus:
         ok = 0
         fail = 0
         done = 0
-        last = None
-        for t in tickers:
-            last = t
+        workers = max(1, min(_MAX_BULK_WORKERS, len(tickers)))
+
+        def run_one(t: str) -> tuple[str, bool]:
             try:
-                r = refresh_price_for_ticker(ticker=t)
-                if r.get("current_price") is None:
-                    fail += 1
-                else:
-                    ok += 1
+                r = refresh_price_for_ticker(ticker=t, ensure_init=False)
+                return (t, r.get("current_price") is not None)
             except Exception:
-                fail += 1
-            done += 1
-            with _lock:
-                s = _jobs.get(job_id)
-                if s:
-                    s.done = done
-                    s.ok = ok
-                    s.fail = fail
-                    s.last_ticker = last
+                return (t, False)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(run_one, t) for t in tickers]
+            for fut in as_completed(futures):
+                t, is_ok = fut.result()
+                if is_ok:
+                    ok += 1
+                else:
+                    fail += 1
+                done += 1
+                with _lock:
+                    s = _jobs.get(job_id)
+                    if s:
+                        s.done = done
+                        s.ok = ok
+                        s.fail = fail
+                        s.last_ticker = t
         with _lock:
             s = _jobs.get(job_id)
             if s:
@@ -266,11 +278,13 @@ def start_bulk_consensus_fill(
         ok = 0
         fail = 0
         done = 0
-        last = None
-        for t in tickers:
-            last = t
+        workers = max(1, min(_MAX_BULK_WORKERS, len(tickers)))
+
+        def run_one(t: str) -> tuple[str, bool]:
             try:
-                r = refresh_consensus_for_ticker(ticker=t, primary_year=primary_year)
+                r = refresh_consensus_for_ticker(
+                    ticker=t, primary_year=primary_year, ensure_init=False
+                )
                 errors = r.get("errors") or []
                 has_any = False
                 cy = r.get("consensus_years") or {}
@@ -282,20 +296,26 @@ def start_bulk_consensus_fill(
                             has_any = True
                             break
                 fnguide_failed = any(str(e).startswith("fnguide:") for e in errors)
-                if fnguide_failed and not has_any:
-                    fail += 1
-                else:
-                    ok += 1
+                return (t, not (fnguide_failed and not has_any))
             except Exception:
-                fail += 1
-            done += 1
-            with _lock:
-                s = _jobs.get(job_id)
-                if s:
-                    s.done = done
-                    s.ok = ok
-                    s.fail = fail
-                    s.last_ticker = last
+                return (t, False)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(run_one, t) for t in tickers]
+            for fut in as_completed(futures):
+                t, is_ok = fut.result()
+                if is_ok:
+                    ok += 1
+                else:
+                    fail += 1
+                done += 1
+                with _lock:
+                    s = _jobs.get(job_id)
+                    if s:
+                        s.done = done
+                        s.ok = ok
+                        s.fail = fail
+                        s.last_ticker = t
         with _lock:
             s = _jobs.get(job_id)
             if s:
