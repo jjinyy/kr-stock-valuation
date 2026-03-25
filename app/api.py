@@ -25,17 +25,14 @@ from app.services.news import fetch_company_news, group_similar_news
 
 router = APIRouter(prefix="/api")
 
-# SQLite SQLITE_MAX_VARIABLE_NUMBER(구버전 999) 대비
+# SQLite 바인딩 변수 제한 대비
 _SNAPSHOT_IN_CHUNK = 400
 
 
 def _fetch_latest_snapshots_by_ticker(session: Session, *, asof: str, tickers: list[str]) -> dict[str, Snapshot]:
     """
-    오늘(asof) 기준 티커당 스냅샷 1건만 선택.
-    - 값이 있는 행(가격/26y 지표 중 하나라도 NOT NULL)을 우선
-    - 그다음 created_at DESC
-    기존 구현은 동일 조건의 행을 전부 읽어와 Python에서 골랐기 때문에,
-    스냅샷이 많이 쌓이면 /api/rows가 매우 느려질 수 있음.
+    오늘(asof) 기준으로 티커당 1건만 고릅니다.
+    값이 있는 행을 우선하고, 그다음 최신(created_at DESC)을 씁니다.
     """
     if not tickers:
         return {}
@@ -76,7 +73,7 @@ def rows(
     # pagination
     page: int = 1,
     page_size: int = 200,
-    # backward-compat (old param)
+    # legacy param
     limit: int | None = None,
     base_year: int | None = None,
     sort_key: str = "name",
@@ -90,13 +87,13 @@ def rows(
     years_window = [int(base_year), int(base_year) + 1, int(base_year) + 2]
 
     with get_session() as session:  # type: Session
-        # 최초 실행 시 상장사 목록이 비어있으면 자동으로 1회 채움
+        # 첫 실행 시 목록이 비어 있으면 한 번 채움
         company_count = session.exec(select(func.count()).select_from(Company)).one()
         if company_count == 0:
             try:
                 refresh_companies_from_kind()
             except httpx.HTTPError:
-                # 네트워크가 막힌 환경이면 일단 빈 상태로 응답
+                # 네트워크가 막힌 환경이면 빈 결과로 둠
                 pass
 
         base = select(Company)
@@ -118,9 +115,7 @@ def rows(
         if sort_dir not in {"asc", "desc"}:
             sort_dir = "asc"
 
-        # 중요: 기존에는 "이름순으로 limit개만 가져온 뒤" 프론트에서 정렬했기 때문에
-        # gap_ratio 같은 지표로 정렬 시 전체 기준 상위 종목이 화면에 안 나오는 문제가 있었다.
-        # -> 지표 정렬일 때는 서버에서 정렬 후 상위 limit개를 반환한다.
+        # 지표 정렬은 서버 기준으로 정렬한 뒤 페이지를 잘라야 함
         needs_server_sort = sort_key in {
             "name",
             "category_l",
@@ -132,7 +127,7 @@ def rows(
             "fair_price",
             "gap_ratio",
         }
-        # 빠른 경로: 단순 컬럼 정렬(이름/카테고리)은 DB에서 offset/limit로 페이지네이션 처리
+        # 이름/카테고리는 DB paging으로 처리
         if sort_key in {"name", "category_l", "category_m"}:
             total_pages = max(1, (total + page_size - 1) // page_size)
             if page > total_pages:
@@ -147,14 +142,13 @@ def rows(
                 order_expr = order_expr.desc()
             companies = session.exec(base.order_by(order_expr, Company.name).offset(off).limit(page_size)).all()
         else:
-            # 지표 정렬은 전체(또는 충분히 큰) 후보에서 계산 후 잘라야 "전체 기준 상위"가 나온다.
+            # 지표 정렬은 충분한 후보를 잡아 계산 후 잘라냄
             candidate_limit = page_size
-            # KRX 전체가 2천여개 수준이라 전부 계산해도 부담이 크지 않음 (안전 상한 5000)
+            # 안전 상한
             candidate_limit = min(max(int(total), int(page_size)), 5000)
             companies = session.exec(base.order_by(Company.name).limit(candidate_limit)).all()
 
-        # 성능: 기존에는 회사마다 Snapshot을 별도 쿼리로 조회(N+1)해서 느렸음.
-        # 오늘(asof) 스냅샷을 한 번에 가져와 ticker별로 선택한다.
+        # 오늘 스냅샷은 한 번에 가져와 매핑
         tickers = [c.ticker for c in companies]
         snaps_by_ticker: dict[str, Snapshot] = {}
         if tickers:
@@ -165,7 +159,7 @@ def rows(
             snap = snaps_by_ticker.get(c.ticker)
 
             current_price: Optional[int] = None
-            # UI에서 year 선택을 지원하기 위해, year별 값을 내려줌
+            # 연도 선택을 위해 year별 값을 내려줌
             consensus_window: dict[str, dict[str, float | None]] = {}
 
             if snap:
@@ -186,7 +180,7 @@ def rows(
                             "eps": v.get("eps"),
                         }
                 else:
-                    # 구버전 데이터: 단일 컬럼만 있으면 base_year로 매핑
+                    # 구버전 단일 컬럼 호환
                     yk = str(base_year)
                     consensus_window[yk] = {
                         "pbr": snap.pbr_26y,
@@ -194,7 +188,7 @@ def rows(
                         "eps": snap.eps_26y,
                     }
 
-            # 기본 표시값은 base_year(선택 기준년도)의 값
+            # 기본 표시값은 base_year 기준
             base_key = str(base_year)
             base_vals = consensus_window.get(base_key) or {}
             pbr = base_vals.get("pbr")
@@ -202,7 +196,7 @@ def rows(
             eps = base_vals.get("eps")
             calc = calc_fair_price_and_gap(current_price=current_price, pbr=pbr, per=per, eps=eps)
 
-            # 연도별 계산값도 함께 내려줘서, 프론트에서 즉시 전환 가능
+            # 연도별 계산값도 함께 내려줌
             consensus_out: dict[str, dict[str, float | int | None]] = {}
             for y in years_window:
                 yk = str(y)
@@ -228,13 +222,11 @@ def rows(
                     "category_l": c.category_l,
                     "category_m": c.category_m,
                     "current_price": current_price,
-                    # 선택 연도(base_year) 기준 표시값
                     "pbr": pbr,
                     "per": per,
                     "eps": eps,
                     "fair_price": calc.fair_price,
                     "gap_ratio": calc.gap_ratio,
-                    # 3개 연도 창
                     "consensus": consensus_out,
                 }
             )
@@ -245,7 +237,6 @@ def rows(
                 out.sort(key=lambda r: (r.get("name") or ""), reverse=reverse)
             else:
                 def key_num(v: float | int | None):
-                    # None은 항상 뒤로
                     if v is None:
                         return (1, 0.0)
                     fv = float(v)
@@ -256,7 +247,7 @@ def rows(
                     try:
                         return key_num(v)  # type: ignore[arg-type]
                     except Exception:
-                        # 숫자 변환이 안 되면 문자열로 비교 (None은 뒤로)
+                        # 숫자 변환이 안 되면 문자열로 비교
                         if v is None:
                             return (1, "")
                         s = str(v)
@@ -264,7 +255,7 @@ def rows(
 
                 out.sort(key=key_generic)
 
-        # 페이지 슬라이스: 지표 정렬 경로에서만 필요 (단순 컬럼 정렬은 이미 DB에서 paging 처리됨)
+        # 지표 정렬에서만 페이지 슬라이스
         total_pages = max(1, (total + page_size - 1) // page_size)
         if sort_key not in {"name", "category_l", "category_m"}:
             if page > total_pages:

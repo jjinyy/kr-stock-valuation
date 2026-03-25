@@ -81,7 +81,7 @@ def _normalize_date(text: str) -> str:
     s = (text or "").strip()
     if not s:
         return "-"
-    # 예: "2026.03.23 09:12"
+    # 예: 2026.03.23 09:12
     try:
         dt = datetime.strptime(s, "%Y.%m.%d %H:%M")
         return dt.strftime("%Y-%m-%d %H:%M")
@@ -120,7 +120,7 @@ def _is_similar_title(a: str, b: str) -> bool:
 
 def fetch_company_news(*, ticker: str, limit: int = 10, timeout_s: int = 20) -> list[dict]:
     """
-    네이버 금융 종목 뉴스 목록에서 최신 기사 파싱.
+    네이버 금융 종목 뉴스에서 최신 기사를 가져옵니다.
     """
     t = ticker.zfill(6)
     url = f"https://finance.naver.com/item/news_news.naver?code={t}&page=1&sm=title_entity_id.basic&clusterId="
@@ -168,9 +168,7 @@ def fetch_company_news(*, ticker: str, limit: int = 10, timeout_s: int = 20) -> 
 
 def group_similar_news(items: list[dict]) -> list[dict]:
     """
-    유사 제목을 묶어 중복 기사 노이즈를 줄인다.
-    - 대표 기사 1개를 남기고 count를 증가
-    - count>1이면 제목 끝에 " (count)"를 붙여 반환
+    유사 제목을 묶어서 중복을 줄입니다.
     """
     groups: list[dict] = []
     for n in items:

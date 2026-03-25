@@ -15,8 +15,7 @@ engine = create_engine(
 
 def _sqlite_ensure_columns() -> None:
     """
-    SQLite는 create_all이 기존 테이블에 컬럼을 추가해주지 않으므로,
-    최소한의 마이그레이션(ADD COLUMN)만 수행합니다.
+    기존 테이블에 컬럼이 없으면 ADD COLUMN만 적용합니다.
     """
     if not DB_PATH.exists():
         return
@@ -42,7 +41,7 @@ def _sqlite_ensure_columns() -> None:
 
         for sql in alters:
             cur.execute(sql)
-        # /api/rows: asof+티커별 최신 스냅샷 조회(윈도우 쿼리) 속도 향상
+        # rows 조회용 인덱스
         cur.execute(
             "CREATE INDEX IF NOT EXISTS ix_snapshot_asof_ticker_created "
             "ON snapshot (asof, ticker, created_at DESC)"
@@ -53,9 +52,7 @@ def _sqlite_ensure_columns() -> None:
 
 def _sqlite_apply_pragmas() -> None:
     """
-    동시성/응답성 개선:
-    - WAL: 읽기/쓰기가 더 잘 공존
-    - busy_timeout: 락 경합 시 즉시 실패 대신 대기
+    동시성/응답성 관련 pragma.
     """
     if not DB_PATH.exists():
         return

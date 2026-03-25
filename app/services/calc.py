@@ -18,9 +18,8 @@ def calc_fair_price_and_gap(
     eps: Optional[float],
 ) -> CalcResult:
     """
-    사용자 정의 공식:
-      적정주가 = (PBR / PER) × 100 × EPS
-      괴리율 = (적정주가 - 현재주가) / 현재주가
+    적정주가 = (PBR / PER) × 100 × EPS
+    괴리율 = (적정주가 - 현재주가) / 현재주가
     """
     if pbr is None or per is None or eps is None:
         return CalcResult(fair_price=None, gap_ratio=None)
@@ -29,7 +28,7 @@ def calc_fair_price_and_gap(
         return CalcResult(fair_price=None, gap_ratio=None)
 
     fair = (pbr / per) * 100.0 * eps
-    if fair != fair:  # NaN
+    if fair != fair:
         return CalcResult(fair_price=None, gap_ratio=None)
 
     fair_i = int(round(fair))

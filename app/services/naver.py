@@ -12,7 +12,7 @@ _DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://finance.naver.com/",
 }
-# bulk 작업에서 매 호출마다 Client를 만들지 않도록 재사용
+# 요청마다 Client를 만들지 않도록 재사용
 _CLIENT = httpx.Client(
     timeout=httpx.Timeout(8.0, connect=3.0),
     follow_redirects=True,
@@ -39,7 +39,7 @@ def fetch_current_price(*, ticker: str, timeout_s: int = 8) -> Optional[int]:
     """
     ticker = ticker.zfill(6)
     url = f"https://finance.naver.com/item/main.nhn?code={ticker}"
-    # 일시적인 네트워크 흔들림 완화를 위해 1회 재시도
+    # 1회 재시도
     last_err: Exception | None = None
     for _ in range(2):
         try:

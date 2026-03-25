@@ -13,15 +13,15 @@ class KindCompanyRow:
     ticker: str
     name: str
     market: str | None
-    category_l: str | None  # 업종구분(대분류 느낌)
-    category_m: str | None  # 산업/업종(좀 더 상세)
+    category_l: str | None  # 업종
+    category_m: str | None  # 주요제품
 
 
 def _market_normalize(raw: str) -> str | None:
     raw = (raw or "").strip()
     if not raw:
         return None
-    # KIND "유가/코스닥/코넥스" 등 표기
+    # KIND 표기 정규화
     if raw in {"유가", "유가증권"}:
         return "KOSPI"
     if raw in {"코스닥"}:
@@ -33,7 +33,7 @@ def _market_normalize(raw: str) -> str | None:
 
 def download_corp_list_html(*, market_type: str, timeout_s: int = 60) -> str:
     """
-    KIND 상장법인목록의 EXCEL 다운로드는 실제로 HTML을 'application/vnd.ms-excel'로 내려줍니다.
+    KIND 상장법인목록은 엑셀 다운로드가 HTML로 내려옵니다.
     """
     url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
     headers = {
@@ -44,11 +44,11 @@ def download_corp_list_html(*, market_type: str, timeout_s: int = 60) -> str:
         "method": "download",
         "pageIndex": "1",
         "currentPageSize": "3000",
-        # corpList는 '전체' 멀티선택이 아니라 단일 시장 선택입니다.
+        # corpList는 단일 시장 선택
         "marketType": market_type,
     }
 
-    # EUC-KR charset
+    # EUC-KR
     with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
         resp = client.post(url, data=data, headers=headers)
         resp.raise_for_status()
@@ -60,7 +60,7 @@ def parse_corp_list(html: str) -> list[KindCompanyRow]:
     soup = BeautifulSoup(html, "lxml")
     rows: list[KindCompanyRow] = []
 
-    # 헤더가 있는 본문 테이블은 보통 가장 큰 표(상장법인 목록)입니다.
+    # 본문에서 가장 큰 표를 목록으로 취급
     tables = soup.find_all("table")
     if not tables:
         return rows
@@ -68,7 +68,7 @@ def parse_corp_list(html: str) -> list[KindCompanyRow]:
     best = max(tables, key=lambda t: len(t.find_all("tr")))
     for tr in best.find_all("tr"):
         tds = tr.find_all("td")
-        # 기본적으로 10컬럼: 회사명/시장구분/종목코드/업종/주요제품/상장일/결산월/대표자명/홈페이지/지역
+        # 회사명/시장/코드/업종/주요제품/상장일/결산월/대표자/홈페이지/지역
         if len(tds) < 3:
             continue
 
@@ -94,7 +94,7 @@ def parse_corp_list(html: str) -> list[KindCompanyRow]:
             )
         )
 
-    # 중복 제거(간혹 반복될 수 있음)
+    # 중복 제거
     dedup: dict[str, KindCompanyRow] = {}
     for r in rows:
         dedup[r.ticker] = r

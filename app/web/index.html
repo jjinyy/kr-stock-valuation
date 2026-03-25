@@ -278,10 +278,10 @@
           <input id="q" placeholder="기업명/종목코드 검색 (예: 삼성전자 또는 005930)" />
           <button id="reload">조회</button>
           <select id="base-year" title="기준년도(3개 연도 창 시작)">
-            <!-- JS에서 채움 -->
+            <!-- JS에서 옵션을 설정 -->
           </select>
           <select id="year" title="표시할 연도(기준년도~+2)">
-            <!-- JS에서 채움 -->
+            <!-- JS에서 옵션을 설정 -->
           </select>
           <div class="sep"></div>
           <button id="refresh-one-price" class="secondary" title="현재 검색어로 1개 종목의 현재가만 갱신">현재가 갱신</button>
@@ -295,9 +295,9 @@
         <div class="status" id="status-top" style="margin-top: 0; margin-bottom: 10px;"></div>
         <div id="advanced" style="display:none; margin-bottom: 10px;">
           <div class="controls" style="margin-bottom: 8px;">
-            <button id="fill-price" class="secondary" title="현재가를 백그라운드로 전체 채웁니다">현재가 모두 채우기</button>
-            <button id="fill-consensus" class="secondary" title="컨센서스를 백그라운드로 전체 채웁니다 (일 1회 권장)">컨센서스 모두 채우기</button>
-            <button id="fill-all" class="secondary" title="현재가+컨센서스를 백그라운드로 모두 채웁니다">전체 채우기</button>
+            <button id="fill-price" class="secondary" title="현재가를 백그라운드로 전체 불러옵니다">현재가 모두 채우기</button>
+            <button id="fill-consensus" class="secondary" title="컨센서스를 백그라운드로 전체 불러옵니다 (일 1회 권장)">컨센서스 모두 채우기</button>
+            <button id="fill-all" class="secondary" title="현재가+컨센서스를 백그라운드로 전체 불러옵니다">전체 채우기</button>
             <div class="sep"></div>
             <button id="refresh-companies" class="secondary" title="KIND 상장법인목록을 갱신">상장사목록 갱신</button>
           </div>
@@ -525,7 +525,7 @@
           render();
           document.getElementById(
             "meta"
-          ).textContent = `표시: ${data.rows.length}개 (총 ${__total}개) · 페이지: ${__page}/${__totalPages} · 기준일: ${data.asof ?? "-"} · 표시연도: ${__year}`;
+          ).textContent = `현재 ${data.rows.length}개를 보여주고 있어요 (전체 ${__total}개) · 페이지 ${__page}/${__totalPages} · 기준일 ${data.asof ?? "-"} · 표시연도 ${__year}`;
           setStatus("");
           updatePager();
         } catch (e) {
@@ -580,7 +580,7 @@
         const v = document.getElementById("q").value.trim();
         window.clearTimeout(window.__t);
         __page = 1;
-        // 검색어가 비워지면 즉시 "전체"로 복귀
+        // 검색어가 비면 전체로 즉시 복귀
         if (!v) {
           load();
           return;
@@ -653,7 +653,7 @@
         setStatus(`<strong>${q}</strong> 현재가 갱신 중… (네이버)`);
         try {
           const r = await postJson(`/api/admin/refresh/price_by_query?q=${encodeURIComponent(q)}`);
-          setStatus(`<strong>${r.ticker}</strong> 현재가 갱신 완료 · 현재가 ${fmtNum(r.current_price)}`);
+          setStatus(`<strong>${r.ticker}</strong> 현재가를 갱신했어요 · 현재가 ${fmtNum(r.current_price)}`);
           await load();
         } catch (e) {
           setStatus(`<strong>${q}</strong> 현재가 갱신 실패: ${e.message}`);
@@ -679,9 +679,9 @@
             )}`
           );
           if (r.skipped) {
-            setStatus(`<strong>${r.ticker}</strong> 컨센서스는 오늘 이미 조회되어 재조회 생략`);
+            setStatus(`<strong>${r.ticker}</strong> 컨센서스는 오늘 이미 조회돼서 다시 가져오지 않았어요`);
           } else {
-            setStatus(`<strong>${r.ticker}</strong> 컨센서스 갱신 완료 · 기준년도 ${r.consensus_primary_year}`);
+            setStatus(`<strong>${r.ticker}</strong> 컨센서스를 갱신했어요 · 기준년도 ${r.consensus_primary_year}`);
           }
           await load();
         } catch (e) {
@@ -698,7 +698,7 @@
         try {
           const start = await postJson(`/api/admin/fill_price?q=${encodeURIComponent(q)}&limit=2000`);
           const jobId = start.job_id;
-          setStatus(`<strong>${q || "전체"}</strong> 현재가 모두 채우기 실행됨: ${start.requested}개 대상 · 진행률 확인 중…`);
+          setStatus(`<strong>${q || "전체"}</strong> 현재가를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`);
 
           const poll = async () => {
             const res = await fetch(`/api/admin/fill/${encodeURIComponent(jobId)}`);
@@ -730,7 +730,7 @@
           );
           const jobId = start.job_id;
           setStatus(
-            `<strong>${q || "전체"}</strong> 컨센서스 모두 채우기 실행됨: ${start.requested}개 대상 · 진행률 확인 중…`
+            `<strong>${q || "전체"}</strong> 컨센서스를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
           );
 
           const poll = async () => {
@@ -761,7 +761,7 @@
           );
           const jobId = start.job_id;
           setStatus(
-            `<strong>${q || "전체"}</strong> 채우기 실행됨: ${start.requested}개 대상 · 진행률 확인 중…`
+            `<strong>${q || "전체"}</strong> 값을 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
           );
 
           const poll = async () => {
@@ -824,7 +824,7 @@
         await load();
       });
 
-      // 기준년도는 현재년도와 다음년도(= 26년자/27년자 같은 선택)만 기본 제공
+      // 기준년도는 현재년~+2년 범위로 제공
       const cy = new Date().getFullYear();
       const baseOptions = [cy, cy + 1];
       setSelectOptions(baseYearEl(), baseOptions, __baseYear);

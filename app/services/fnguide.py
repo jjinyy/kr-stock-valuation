@@ -49,7 +49,7 @@ def _to_float(text: str) -> Optional[float]:
 
 def _extract_year_token(cell_text: str) -> str:
     """
-    헤더에 '(E) : ... 2026/12(E)' 같은 설명이 섞이므로, 연도 토큰만 뽑습니다.
+    헤더에서 연도 토큰만 뽑습니다.
     """
     cell_text = (cell_text or "").strip()
     # 우선 2026/12(E) 패턴을 찾고, 없으면 raw 반환
@@ -66,7 +66,7 @@ def fetch_fnguide_main_html(*, ticker: str, timeout_s: int = 12) -> str:
     ticker = ticker.zfill(6)
     # gicode: A + 6자리
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode=A{ticker}&MenuYn=Y&NewMenuID=11"
-    # 일시적인 네트워크 오류 대응: 1회 재시도
+    # 1회 재시도
     last_err: Exception | None = None
     for _ in range(2):
         try:
@@ -87,8 +87,6 @@ def _norm_space(s: str) -> str:
 def parse_categories_from_main(html: str) -> tuple[Optional[str], Optional[str]]:
     """
     FnGuide 헤더에서 분류 문자열을 뽑습니다.
-    - category_l: 시장/업종(예: "코스피 전기·전자")
-    - category_m: FICS(예: "FICS 반도체 및 관련장비")
     """
     soup = BeautifulSoup(html, "lxml")
     grp = soup.select_one("p.stxt_group")
@@ -181,7 +179,7 @@ def parse_consensus_years_from_main(html: str) -> dict[int, Consensus26Y]:
     """
     soup = BeautifulSoup(html, "lxml")
 
-    # 테이블 후보 중 "추정치(…/12(E))" 컬럼이 있는 Financial Highlight를 우선 선택
+    # 추정치 컬럼이 많은 테이블을 우선 선택
     now_y = date.today().year
     best_tbl = None
     best_score = -1
@@ -192,7 +190,7 @@ def parse_consensus_years_from_main(html: str) -> dict[int, Consensus26Y]:
         if not ("EPS(원)" in txt and "PER(배)" in txt and "PBR(배)" in txt):
             continue
 
-        # (E) 추정치 연도 컬럼이 많을수록 점수↑, 최소한 당년/내년 추정치가 있으면 가산
+        # (E) 컬럼이 많을수록 점수↑
         e_years = re.findall(r"\b20\d{2}/12\(E\)\b", txt)
         score = len(set(e_years)) * 10
         if f"{now_y}/12" in txt:
