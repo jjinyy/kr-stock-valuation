@@ -29,6 +29,189 @@ router = APIRouter(prefix="/api")
 _SNAPSHOT_IN_CHUNK = 400
 
 
+def _extract_year_consensus(snap: Snapshot, *, year: int) -> tuple[float | None, float | None, float | None]:
+    """
+    스냅샷에서 특정 연도의 (pbr, per, eps)를 꺼냅니다.
+    - consensus_json이 있으면 해당 연도 값을 우선
+    - 없거나 파싱 실패면 legacy 컬럼을 사용(단, 요청 연도가 base_year일 때만 의미가 있을 수 있음)
+    """
+    if snap.consensus_json:
+        try:
+            raw = json.loads(snap.consensus_json)
+            if isinstance(raw, dict):
+                yv = raw.get(str(year), {}) or {}
+                if isinstance(yv, dict):
+                    return (yv.get("pbr"), yv.get("per"), yv.get("eps"))
+        except Exception:
+            pass
+    return (snap.pbr_26y, snap.per_26y, snap.eps_26y)
+
+
+def _norm_cat(v: str | None) -> str:
+    s = (v or "").strip()
+    return s if s else "미분류"
+
+
+@router.get("/categories")
+def categories(category_l: str | None = None):
+    """
+    카테고리(대/중) 목록을 반환합니다.
+    - category_l을 주면 해당 대분류에 속한 중분류만 반환
+    - category_l이 없으면 중분류는 전체에서 반환(요청대로 대분류 무시)
+    """
+    init_db()
+    with get_session() as session:
+        l_rows = session.exec(select(Company.category_l).distinct().order_by(Company.category_l)).all()
+        if category_l is not None and category_l.strip():
+            base = (
+                select(Company.category_m)
+                .where(Company.category_l == category_l.strip())
+                .distinct()
+                .order_by(Company.category_m)
+            )
+            m_rows = session.exec(base).all()
+        else:
+            m_rows = session.exec(select(Company.category_m).distinct().order_by(Company.category_m)).all()
+
+    out_l = [_norm_cat(v) for v in l_rows if (v or "").strip()]
+    out_m = [_norm_cat(v) for v in m_rows if (v or "").strip()]
+    return {"category_l": out_l, "category_m": out_m}
+
+
+@router.get("/category/summary")
+def category_summary(
+    level: str = "category_m",
+    year: int | None = None,
+    base_year: int | None = None,
+    category_l: str | None = None,
+):
+    """
+    대/중분류별 괴리율 요약(평균) 목록.
+    - level: category_l | category_m
+    - category_l: (선택) 중분류 요약을 '특정 대분류'로 제한할 때 사용
+    """
+    init_db()
+    today = date.today().isoformat()
+    if base_year is None:
+        base_year = date.today().year
+    if year is None:
+        year = int(base_year)
+    level = (level or "category_m").strip()
+    if level not in {"category_l", "category_m"}:
+        raise HTTPException(status_code=400, detail="level must be category_l or category_m")
+    cat_l = (category_l or "").strip() or None
+
+    with get_session() as session:
+        base = select(Company).order_by(Company.name).limit(5000)
+        if level == "category_m" and cat_l:
+            base = base.where(Company.category_l == cat_l)
+        companies = session.exec(base).all()
+        tickers = [c.ticker for c in companies]
+        snaps_by_ticker = _fetch_latest_snapshots_by_ticker(session, asof=today, tickers=tickers)
+
+    by_ticker = {c.ticker: c for c in companies}
+    groups: dict[str, list[float]] = {}
+    counts: dict[str, int] = {}
+    for ticker in tickers:
+        c = by_ticker[ticker]
+        snap = snaps_by_ticker.get(ticker)
+        key = _norm_cat(getattr(c, level))
+        counts[key] = counts.get(key, 0) + 1
+        if not snap or snap.current_price is None:
+            continue
+        pbr, per, eps = _extract_year_consensus(snap, year=year)
+        calc = calc_fair_price_and_gap(current_price=snap.current_price, pbr=pbr, per=per, eps=eps)
+        if calc.gap_ratio is None:
+            continue
+        groups.setdefault(key, []).append(float(calc.gap_ratio))
+
+    out = []
+    for k, vals in groups.items():
+        if not vals:
+            continue
+        avg = sum(vals) / float(len(vals))
+        out.append(
+            {
+                "key": k,
+                "avg_gap_ratio": avg,
+                "n_total": counts.get(k, 0),
+                "n_with_gap": len(vals),
+            }
+        )
+    out.sort(key=lambda r: r["avg_gap_ratio"], reverse=True)
+    return {
+        "asof": today,
+        "base_year": int(base_year),
+        "year": int(year),
+        "level": level,
+        "category_l": cat_l,
+        "groups": out,
+    }
+
+
+@router.get("/category/top5")
+def category_top5(
+    level: str = "category_m",
+    key: str = "",
+    year: int | None = None,
+    base_year: int | None = None,
+    category_l: str | None = None,
+):
+    """
+    선택한 분류(key)에서 괴리율 Top5(저평가/고평가)를 반환합니다.
+    - 저평가(+) Top5: gap_ratio 내림차순
+    - 고평가(-) Top5: gap_ratio 오름차순
+    """
+    init_db()
+    today = date.today().isoformat()
+    if base_year is None:
+        base_year = date.today().year
+    if year is None:
+        year = int(base_year)
+    level = (level or "category_m").strip()
+    if level not in {"category_l", "category_m"}:
+        raise HTTPException(status_code=400, detail="level must be category_l or category_m")
+    key = _norm_cat((key or "").strip())
+    cat_l = (category_l or "").strip() or None
+
+    with get_session() as session:
+        base = select(Company).order_by(Company.name).limit(5000)
+        if level == "category_m" and cat_l:
+            base = base.where(Company.category_l == cat_l)
+        companies = session.exec(base).all()
+        tickers = [c.ticker for c in companies]
+        snaps_by_ticker = _fetch_latest_snapshots_by_ticker(session, asof=today, tickers=tickers)
+
+    by_ticker = {c.ticker: c for c in companies}
+    scored: list[dict] = []
+    for ticker in tickers:
+        c = by_ticker[ticker]
+        if _norm_cat(getattr(c, level)) != key:
+            continue
+        snap = snaps_by_ticker.get(ticker)
+        if not snap or snap.current_price is None:
+            continue
+        pbr, per, eps = _extract_year_consensus(snap, year=year)
+        calc = calc_fair_price_and_gap(current_price=snap.current_price, pbr=pbr, per=per, eps=eps)
+        if calc.gap_ratio is None:
+            continue
+        scored.append({"ticker": c.ticker, "name": c.name, "gap_ratio": float(calc.gap_ratio)})
+
+    top_pos = sorted([r for r in scored if r["gap_ratio"] > 0], key=lambda x: x["gap_ratio"], reverse=True)[:5]
+    top_neg = sorted([r for r in scored if r["gap_ratio"] < 0], key=lambda x: x["gap_ratio"])[:5]
+    return {
+        "asof": today,
+        "base_year": int(base_year),
+        "year": int(year),
+        "level": level,
+        "category_l": cat_l,
+        "key": key,
+        "top_undervalued": top_pos,
+        "top_overvalued": top_neg,
+        "n_scored": len(scored),
+    }
+
+
 def _fetch_latest_snapshots_by_ticker(session: Session, *, asof: str, tickers: list[str]) -> dict[str, Snapshot]:
     """
     오늘(asof) 기준으로 티커당 1건만 고릅니다.

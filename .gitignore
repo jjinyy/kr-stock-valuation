@@ -15,3 +15,9 @@ data.sqlite3-*
 # editor
 .vscode/
 
+# frontend (Vite + React)
+frontend/node_modules/
+
+# production SPA build (run `npm run build` in ./frontend)
+app/web/dist/
+
