@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import json
 import httpx
-from sqlmodel import select
+from sqlmodel import Session, select
 
 from app.db import get_session, init_db
 from app.models import Company, Snapshot
@@ -30,6 +30,198 @@ def _get_or_create_today_snapshot(session, *, ticker: str, today: str) -> Snapsh
     snap = Snapshot(ticker=ticker, asof=today)
     session.add(snap)
     return snap
+
+
+def _to_consensus_json(d: dict[int, object] | None) -> str | None:
+    # d=None: 호출 실패/미시도
+    # d={}: 조회했지만 값이 없을 수 있음(오늘 조회됨 표시용)
+    if d is None:
+        return None
+    if not d:
+        return "{}"
+    # JSON key는 string
+    payload: dict[str, dict[str, float | None]] = {}
+    for y, c in d.items():
+        payload[str(int(y))] = {
+            "pbr": getattr(c, "pbr", None),
+            "per": getattr(c, "per", None),
+            "eps": getattr(c, "eps", None),
+        }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def refresh_snapshot_for_ticker_in_session(
+    session: Session, *, ticker: str, today: str, primary_year: int, commit: bool = True
+) -> dict:
+    ticker = ticker.zfill(6)
+
+    current_price = None
+    consensus_years: dict[int, object] | None = None
+    errors: list[str] = []
+
+    try:
+        current_price = fetch_current_price(ticker=ticker)
+    except httpx.HTTPError as e:
+        errors.append(f"naver: {type(e).__name__}")
+
+    try:
+        info = fetch_main_info(ticker=ticker)
+        consensus_years = info.consensus_years
+    except httpx.HTTPError as e:
+        errors.append(f"fnguide: {type(e).__name__}")
+        # 오늘은 조회를 시도했으니 중복 호출만 막음
+        consensus_years = {}
+
+    primary = (consensus_years or {}).get(primary_year) if consensus_years else None
+    consensus_json = _to_consensus_json(consensus_years)
+    consensus_payload = json.loads(consensus_json) if consensus_json else None
+
+    snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+    snap.current_price = current_price
+    # 기본 연도 값은 기존 컬럼에도 채움(호환)
+    snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
+    snap.per_26y = getattr(primary, "per", None) if primary else None
+    snap.eps_26y = getattr(primary, "eps", None) if primary else None
+    snap.consensus_json = consensus_json
+    snap.consensus_primary_year = primary_year
+    if commit:
+        session.commit()
+
+    return {
+        "ticker": ticker,
+        "asof": today,
+        "current_price": current_price,
+        "pbr_26y": getattr(primary, "pbr", None) if primary else None,
+        "per_26y": getattr(primary, "per", None) if primary else None,
+        "eps_26y": getattr(primary, "eps", None) if primary else None,
+        "consensus_years": consensus_payload,
+        "consensus_primary_year": primary_year,
+        "errors": errors,
+    }
+
+
+def refresh_price_for_ticker_in_session(session: Session, *, ticker: str, today: str, commit: bool = True) -> dict:
+    """
+    네이버 현재가만 갱신합니다. (컨센서스는 기존 저장값을 재사용)
+    """
+    ticker = ticker.zfill(6)
+
+    errors: list[str] = []
+    current_price = None
+    try:
+        current_price = fetch_current_price(ticker=ticker)
+    except httpx.HTTPError as e:
+        errors.append(f"naver: {type(e).__name__}")
+
+    # 기존 컨센서스는 최신 스냅샷에서 복사
+    consensus_json = None
+    consensus_primary_year = None
+    pbr = per = eps = None
+    prev = _latest_snapshot_today(session, ticker=ticker, today=today)
+    if prev:
+        consensus_json = prev.consensus_json
+        consensus_primary_year = prev.consensus_primary_year
+        pbr = prev.pbr_26y
+        per = prev.per_26y
+        eps = prev.eps_26y
+
+    snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+    snap.current_price = current_price
+    snap.pbr_26y = pbr
+    snap.per_26y = per
+    snap.eps_26y = eps
+    snap.consensus_json = consensus_json
+    snap.consensus_primary_year = consensus_primary_year
+    if commit:
+        session.commit()
+
+    return {"ticker": ticker, "asof": today, "current_price": current_price, "errors": errors}
+
+
+def refresh_consensus_for_ticker_in_session(
+    session: Session,
+    *,
+    ticker: str,
+    today: str,
+    primary_year: int,
+    skip_if_already_today: bool = False,
+    commit: bool = True,
+) -> dict:
+    """
+    FnGuide 컨센서스만 갱신합니다. (현재가는 기존 저장값을 재사용)
+    """
+    ticker = ticker.zfill(6)
+
+    # 단건에서도 오늘 조회된 컨센서스는 재호출을 피함
+    prev = _latest_snapshot_today(session, ticker=ticker, today=today)
+    if skip_if_already_today and prev and (
+        prev.consensus_json or prev.pbr_26y is not None or prev.per_26y is not None or prev.eps_26y is not None
+    ):
+        payload = None
+        if prev.consensus_json:
+            try:
+                raw = json.loads(prev.consensus_json)
+                if isinstance(raw, dict):
+                    payload = raw
+            except Exception:
+                payload = None
+        return {
+            "ticker": ticker,
+            "asof": today,
+            "current_price": prev.current_price,
+            "consensus_years": payload,
+            "consensus_primary_year": int(primary_year),
+            "errors": [],
+            "skipped": True,
+        }
+
+    errors: list[str] = []
+    consensus_years: dict[int, object] | None = None
+    try:
+        info = fetch_main_info(ticker=ticker)
+        consensus_years = info.consensus_years
+    except httpx.HTTPError as e:
+        errors.append(f"fnguide: {type(e).__name__}")
+        # 오늘은 조회를 시도했으니 중복 호출만 막음
+        consensus_years = {}
+
+    payload: dict[str, dict[str, float | None]] | None = None
+    consensus_json: str | None = None
+    if consensus_years is not None:
+        payload = {}
+        for y, c in consensus_years.items():
+            payload[str(int(y))] = {
+                "pbr": getattr(c, "pbr", None),
+                "per": getattr(c, "per", None),
+                "eps": getattr(c, "eps", None),
+            }
+        # 빈 dict라도 오늘 조회됨으로 표시(only_missing 스킵용)
+        consensus_json = json.dumps(payload, ensure_ascii=False)
+
+    primary = (consensus_years or {}).get(int(primary_year)) if consensus_years else None
+
+    # 현재가는 기존 값 재사용
+    current_price = prev.current_price if prev else None
+
+    snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
+    snap.current_price = current_price
+    snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
+    snap.per_26y = getattr(primary, "per", None) if primary else None
+    snap.eps_26y = getattr(primary, "eps", None) if primary else None
+    snap.consensus_json = consensus_json
+    snap.consensus_primary_year = int(primary_year)
+    if commit:
+        session.commit()
+
+    return {
+        "ticker": ticker,
+        "asof": today,
+        "current_price": current_price,
+        "consensus_years": payload,
+        "consensus_primary_year": int(primary_year),
+        "errors": errors,
+        "skipped": False,
+    }
 
 
 def refresh_companies_from_kind() -> dict:
@@ -79,69 +271,10 @@ def refresh_snapshot_for_ticker(*, ticker: str, ensure_init: bool = True) -> dic
     ticker = ticker.zfill(6)
     today = date.today().isoformat()
     primary_year = date.today().year
-
-    current_price = None
-    consensus_years: dict[int, object] | None = None
-    errors: list[str] = []
-
-    try:
-        current_price = fetch_current_price(ticker=ticker)
-    except httpx.HTTPError as e:
-        errors.append(f"naver: {type(e).__name__}")
-
-    try:
-        info = fetch_main_info(ticker=ticker)
-        consensus_years = info.consensus_years
-    except httpx.HTTPError as e:
-        errors.append(f"fnguide: {type(e).__name__}")
-        # 오늘은 조회를 시도했으니 중복 호출만 막음
-        consensus_years = {}
-
-    def to_json(d: dict[int, object] | None) -> str | None:
-        # d=None: 호출 실패/미시도
-        # d={}: 조회했지만 값이 없을 수 있음(오늘 조회됨 표시용)
-        if d is None:
-            return None
-        if not d:
-            return "{}"
-        # JSON key는 string
-        payload: dict[str, dict[str, float | None]] = {}
-        for y, c in d.items():
-            payload[str(int(y))] = {
-                "pbr": getattr(c, "pbr", None),
-                "per": getattr(c, "per", None),
-                "eps": getattr(c, "eps", None),
-            }
-        return json.dumps(payload, ensure_ascii=False)
-
-    primary = (consensus_years or {}).get(primary_year) if consensus_years else None
-    consensus_json = to_json(consensus_years)
-    consensus_payload = json.loads(consensus_json) if consensus_json else None
-
     with get_session() as session:
-        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
-        snap.current_price = current_price
-        # 기본 연도 값은 기존 컬럼에도 채움(호환)
-        snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
-        snap.per_26y = getattr(primary, "per", None) if primary else None
-        snap.eps_26y = getattr(primary, "eps", None) if primary else None
-        snap.consensus_json = consensus_json
-        snap.consensus_primary_year = primary_year
-        session.commit()
-
-        # 회사 정보가 없을 수도 있음
-
-    return {
-        "ticker": ticker,
-        "asof": today,
-        "current_price": current_price,
-        "pbr_26y": getattr(primary, "pbr", None) if primary else None,
-        "per_26y": getattr(primary, "per", None) if primary else None,
-        "eps_26y": getattr(primary, "eps", None) if primary else None,
-        "consensus_years": consensus_payload,
-        "consensus_primary_year": primary_year,
-        "errors": errors,
-    }
+        return refresh_snapshot_for_ticker_in_session(
+            session, ticker=ticker, today=today, primary_year=primary_year, commit=True
+        )
 
 
 def refresh_price_for_ticker(*, ticker: str, ensure_init: bool = True) -> dict:
@@ -152,42 +285,8 @@ def refresh_price_for_ticker(*, ticker: str, ensure_init: bool = True) -> dict:
         init_db()
     ticker = ticker.zfill(6)
     today = date.today().isoformat()
-
-    errors: list[str] = []
-    current_price = None
-    try:
-        current_price = fetch_current_price(ticker=ticker)
-    except httpx.HTTPError as e:
-        errors.append(f"naver: {type(e).__name__}")
-
-    # 기존 컨센서스는 최신 스냅샷에서 복사
-    consensus_json = None
-    consensus_primary_year = None
-    pbr = per = eps = None
     with get_session() as session:
-        prev = _latest_snapshot_today(session, ticker=ticker, today=today)
-        if prev:
-            consensus_json = prev.consensus_json
-            consensus_primary_year = prev.consensus_primary_year
-            pbr = prev.pbr_26y
-            per = prev.per_26y
-            eps = prev.eps_26y
-
-        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
-        snap.current_price = current_price
-        snap.pbr_26y = pbr
-        snap.per_26y = per
-        snap.eps_26y = eps
-        snap.consensus_json = consensus_json
-        snap.consensus_primary_year = consensus_primary_year
-        session.commit()
-
-    return {
-        "ticker": ticker,
-        "asof": today,
-        "current_price": current_price,
-        "errors": errors,
-    }
+        return refresh_price_for_ticker_in_session(session, ticker=ticker, today=today, commit=True)
 
 
 def refresh_consensus_for_ticker(
@@ -207,84 +306,15 @@ def refresh_consensus_for_ticker(
     if primary_year is None:
         primary_year = date.today().year
 
-    # 단건에서도 오늘 조회된 컨센서스는 재호출을 피함
     with get_session() as session:
-        prev = _latest_snapshot_today(session, ticker=ticker, today=today)
-        if skip_if_already_today and prev and (
-            prev.consensus_json
-            or prev.pbr_26y is not None
-            or prev.per_26y is not None
-            or prev.eps_26y is not None
-        ):
-            payload = None
-            if prev.consensus_json:
-                try:
-                    raw = json.loads(prev.consensus_json)
-                    if isinstance(raw, dict):
-                        payload = raw
-                except Exception:
-                    payload = None
-            return {
-                "ticker": ticker,
-                "asof": today,
-                "current_price": prev.current_price,
-                "consensus_years": payload,
-                "consensus_primary_year": int(primary_year),
-                "errors": [],
-                "skipped": True,
-            }
-
-    errors: list[str] = []
-    consensus_years: dict[int, object] | None = None
-
-    try:
-        info = fetch_main_info(ticker=ticker)
-        consensus_years = info.consensus_years
-    except httpx.HTTPError as e:
-        errors.append(f"fnguide: {type(e).__name__}")
-        # 오늘은 조회를 시도했으니 중복 호출만 막음
-        consensus_years = {}
-
-    payload: dict[str, dict[str, float | None]] | None = None
-    consensus_json: str | None = None
-    if consensus_years is not None:
-        payload = {}
-        for y, c in consensus_years.items():
-            payload[str(int(y))] = {
-                "pbr": getattr(c, "pbr", None),
-                "per": getattr(c, "per", None),
-                "eps": getattr(c, "eps", None),
-            }
-        # 빈 dict라도 오늘 조회됨으로 표시(only_missing 스킵용)
-        consensus_json = json.dumps(payload, ensure_ascii=False)
-
-    primary = (consensus_years or {}).get(int(primary_year)) if consensus_years else None
-
-    # 현재가는 기존 값 재사용
-    current_price = None
-    with get_session() as session:
-        prev = _latest_snapshot_today(session, ticker=ticker, today=today)
-        if prev:
-            current_price = prev.current_price
-
-        snap = _get_or_create_today_snapshot(session, ticker=ticker, today=today)
-        snap.current_price = current_price
-        snap.pbr_26y = getattr(primary, "pbr", None) if primary else None
-        snap.per_26y = getattr(primary, "per", None) if primary else None
-        snap.eps_26y = getattr(primary, "eps", None) if primary else None
-        snap.consensus_json = consensus_json
-        snap.consensus_primary_year = int(primary_year)
-        session.commit()
-
-    return {
-        "ticker": ticker,
-        "asof": today,
-        "current_price": current_price,
-        "consensus_years": payload,
-        "consensus_primary_year": int(primary_year),
-        "errors": errors,
-        "skipped": False,
-    }
+        return refresh_consensus_for_ticker_in_session(
+            session,
+            ticker=ticker,
+            today=today,
+            primary_year=int(primary_year),
+            skip_if_already_today=skip_if_already_today,
+            commit=True,
+        )
 
 
 def refresh_snapshots_for_all(*, limit: int = 200) -> dict:

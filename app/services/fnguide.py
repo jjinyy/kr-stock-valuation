@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass
 from datetime import date
+from threading import Lock, local
+from time import time
 from typing import Optional
 
 import httpx
@@ -28,11 +31,60 @@ _DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://comp.fnguide.com/",
 }
-_CLIENT = httpx.Client(
-    timeout=httpx.Timeout(12.0, connect=4.0),
-    follow_redirects=True,
-    limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
-)
+_tls = local()
+
+
+def _get_client() -> httpx.Client:
+    """
+    httpx.Client는 스레드 안전을 보장하지 않으므로, bulk(스레드풀)에서 병렬 호출 시
+    스레드별로 Client를 분리해 keep-alive 효율을 유지합니다.
+    """
+    cli = getattr(_tls, "client", None)
+    if cli is None:
+        cli = httpx.Client(
+            timeout=httpx.Timeout(12.0, connect=4.0),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
+        )
+        _tls.client = cli
+    return cli
+
+_cache_lock = Lock()
+_html_cache: dict[str, tuple[float, str]] = {}
+
+
+def _html_cache_ttl_s() -> int:
+    raw = os.getenv("FNGUIDE_HTML_CACHE_TTL", "").strip()
+    if not raw:
+        return 600  # 10분
+    try:
+        return max(0, min(int(raw), 6 * 3600))
+    except ValueError:
+        return 600
+
+
+def _html_cache_get(key: str) -> str | None:
+    ttl = _html_cache_ttl_s()
+    if ttl <= 0:
+        return None
+    now = time()
+    with _cache_lock:
+        hit = _html_cache.get(key)
+        if not hit:
+            return None
+        ts, html = hit
+        if now - ts > ttl:
+            _html_cache.pop(key, None)
+            return None
+        return html
+
+
+def _html_cache_set(key: str, html: str) -> None:
+    ttl = _html_cache_ttl_s()
+    if ttl <= 0:
+        return
+    with _cache_lock:
+        _html_cache[key] = (time(), html)
 
 
 def _to_float(text: str) -> Optional[float]:
@@ -66,13 +118,19 @@ def fetch_fnguide_main_html(*, ticker: str, timeout_s: int = 12) -> str:
     ticker = ticker.zfill(6)
     # gicode: A + 6자리
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode=A{ticker}&MenuYn=Y&NewMenuID=11"
+    cache_key = f"main:{ticker}"
+    cached = _html_cache_get(cache_key)
+    if cached is not None:
+        return cached
     # 1회 재시도
     last_err: Exception | None = None
     for _ in range(2):
         try:
-            resp = _CLIENT.get(url, headers=_DEFAULT_HEADERS, timeout=timeout_s)
+            resp = _get_client().get(url, headers=_DEFAULT_HEADERS, timeout=timeout_s)
             resp.raise_for_status()
-            return resp.text
+            html = resp.text
+            _html_cache_set(cache_key, html)
+            return html
         except httpx.HTTPError as e:
             last_err = e
     if last_err:

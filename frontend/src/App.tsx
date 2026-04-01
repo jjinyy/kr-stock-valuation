@@ -138,6 +138,28 @@ export default function App() {
   const [top5Open, setTop5Open] = useState(false);
   const [newsRows, setNewsRows] = useState<NewsRow[] | "loading" | "error" | "empty">([]);
   const [consensusBusy, setConsensusBusy] = useState(false);
+  const [priceRefreshBusy, setPriceRefreshBusy] = useState(false);
+  const [companiesBusy, setCompaniesBusy] = useState(false);
+  const [bulkFillMode, setBulkFillMode] = useState<null | "price" | "consensus" | "all">(null);
+  const bulkFillBusy = bulkFillMode !== null;
+  const [activityBanner, setActivityBanner] = useState<string | null>(null);
+  const activityClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearActivityTimer = () => {
+    if (activityClearTimer.current !== null) {
+      clearTimeout(activityClearTimer.current);
+      activityClearTimer.current = null;
+    }
+  };
+
+  const showTransientActivity = (message: string, ms = 3800) => {
+    clearActivityTimer();
+    setActivityBanner(message);
+    activityClearTimer.current = setTimeout(() => {
+      setActivityBanner(null);
+      activityClearTimer.current = null;
+    }, ms);
+  };
 
   // category analytics
   const [catLAll, setCatLAll] = useState<string[]>([]);
@@ -182,6 +204,7 @@ export default function App() {
   useEffect(() => () => {
     if (searchTimer.current !== null) clearTimeout(searchTimer.current);
     clearPoll();
+    clearActivityTimer();
   }, []);
 
   const load = useCallback(async () => {
@@ -395,15 +418,22 @@ export default function App() {
         };
         const pct = st.requested > 0 ? `${Math.floor((st.done / st.requested) * 100)}%` : "100%";
         const tail = st.last_ticker ? ` · 최근: ${st.last_ticker}` : "";
+        const plainLine = `${qForLabel || "전체"} ${label}: ${pct} (${st.done}/${st.requested}) · 성공 ${st.ok} · 데이터 없음 ${st.fail}${st.last_ticker ? ` · 최근 ${st.last_ticker}` : ""}`;
+        clearActivityTimer();
+        setActivityBanner(plainLine);
         setStatusHtml(
           `<strong>${qForLabel || "전체"}</strong> ${label}: ${pct} (${st.done}/${st.requested}) · 성공 ${st.ok} · 데이터 없음 ${st.fail}${tail}`
         );
         if (st.finished_at) {
+          setBulkFillMode(null);
+          setActivityBanner(null);
           await load();
           return;
         }
         pollTimer.current = setTimeout(() => void run(jobId), 1500);
       } catch {
+        setBulkFillMode(null);
+        setActivityBanner(null);
         setStatusHtml(`<strong>${qForLabel || "전체"}</strong> 진행 확인 실패`);
       }
     };
@@ -504,13 +534,39 @@ export default function App() {
           <button
             type="button"
             className="secondary"
+            disabled={priceRefreshBusy || consensusBusy || bulkFillBusy || companiesBusy}
             title="현재 검색어로 1개 종목의 현재가만 갱신"
             onClick={async () => {
               const q = qInput.trim();
               if (!q) {
-                setStatusHtml("검색어를 입력해주세요. (기업명 또는 종목코드)");
+                // 검색어가 없으면 "전체" 대상으로 현재가 채우기(백그라운드)로 동작
+                const qLabel = "전체";
+                clearActivityTimer();
+                setBulkFillMode("price");
+                setActivityBanner(`${qLabel} 현재가 모두 채우기: 요청 보내는 중…`);
+                setStatusHtml(`<strong>${qLabel}</strong> 현재가 모두 채우기 시작… (백그라운드)`);
+                try {
+                  const start = (await postJson(`/api/admin/fill_price?q=&limit=2000`)) as {
+                    job_id: string;
+                    requested: number;
+                  };
+                  setStatusHtml(
+                    `<strong>${qLabel}</strong> 현재가를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
+                  );
+                  setActivityBanner(`${qLabel} 현재가 모두 채우기: 진행 중… (0/${start.requested})`);
+                  void startFillPoll("현재가 모두 채우기", qLabel)(start.job_id);
+                } catch (e) {
+                  setBulkFillMode(null);
+                  setActivityBanner(null);
+                  setStatusHtml(
+                    `<strong>${qLabel}</strong> 현재가 모두 채우기 시작 실패: ${e instanceof Error ? e.message : String(e)}`
+                  );
+                }
                 return;
               }
+              clearActivityTimer();
+              setPriceRefreshBusy(true);
+              setActivityBanner(`「${q}」 현재가 갱신 중… (네이버)`);
               setStatusHtml(`<strong>${q}</strong> 현재가 갱신 중… (네이버)`);
               try {
                 const r = (await postJson(`/api/admin/refresh/price_by_query?q=${encodeURIComponent(q)}`)) as {
@@ -523,23 +579,49 @@ export default function App() {
                 await load();
               } catch (e) {
                 setStatusHtml(`<strong>${q}</strong> 현재가 갱신 실패: ${e instanceof Error ? e.message : String(e)}`);
+              } finally {
+                setPriceRefreshBusy(false);
+                setActivityBanner(null);
               }
             }}
           >
-            현재가 갱신
+            {priceRefreshBusy ? "현재가 갱신 중…" : "현재가 갱신"}
           </button>
           <button
             type="button"
             className="secondary"
-            disabled={consensusBusy}
+            disabled={consensusBusy || priceRefreshBusy || bulkFillBusy || companiesBusy}
             title="현재 검색어로 1개 종목의 컨센서스만 갱신"
             onClick={async () => {
               const q = qInput.trim();
               if (!q) {
-                setStatusHtml("검색어를 입력해주세요. (기업명 또는 종목코드)");
+                // 검색어가 없으면 "전체" 대상으로 컨센서스 채우기(백그라운드)로 동작
+                const qLabel = "전체";
+                clearActivityTimer();
+                setBulkFillMode("consensus");
+                setActivityBanner(`${qLabel} 컨센서스 모두 채우기: 요청 보내는 중…`);
+                setStatusHtml(`<strong>${qLabel}</strong> 컨센서스 모두 채우기 시작… (백그라운드)`);
+                try {
+                  const start = (await postJson(
+                    `/api/admin/fill_consensus?q=&limit=2000&only_missing=true&primary_year=${encodeURIComponent(baseYear)}`
+                  )) as { job_id: string; requested: number };
+                  setStatusHtml(
+                    `<strong>${qLabel}</strong> 컨센서스를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
+                  );
+                  setActivityBanner(`${qLabel} 컨센서스 모두 채우기: 진행 중… (0/${start.requested})`);
+                  void startFillPoll("컨센서스 모두 채우기", qLabel)(start.job_id);
+                } catch (e) {
+                  setBulkFillMode(null);
+                  setActivityBanner(null);
+                  setStatusHtml(
+                    `<strong>${qLabel}</strong> 컨센서스 모두 채우기 시작 실패: ${e instanceof Error ? e.message : String(e)}`
+                  );
+                }
                 return;
               }
+              clearActivityTimer();
               setConsensusBusy(true);
+              setActivityBanner(`「${q}」 컨센서스 갱신 중… (FnGuide)`);
               setStatusHtml(`<strong>${q}</strong> 컨센서스 갱신 중… (FnGuide)`);
               try {
                 const r = (await postJson(
@@ -557,10 +639,11 @@ export default function App() {
                 setStatusHtml(`<strong>${q}</strong> 컨센서스 갱신 실패: ${e instanceof Error ? e.message : String(e)}`);
               } finally {
                 setConsensusBusy(false);
+                setActivityBanner(null);
               }
             }}
           >
-            {consensusBusy ? "갱신 중…" : "컨센서스 갱신"}
+            {consensusBusy ? "컨센서스 갱신 중…" : "컨센서스 갱신"}
           </button>
           <button type="button" className="secondary" onClick={() => setAdvancedOpen((v) => !v)}>
             고급
@@ -572,85 +655,116 @@ export default function App() {
       </div>
 
       <div className="card">
+        {activityBanner ? (
+          <div className="activity-banner" role="status" aria-live="polite">
+            <span className="activity-banner-spinner" aria-hidden />
+            <span className="activity-banner-text">{activityBanner}</span>
+          </div>
+        ) : null}
         {advancedOpen ? (
           <div style={{ marginBottom: 10 }}>
             <div className="controls" style={{ marginBottom: 8 }}>
               <button
                 type="button"
                 className="secondary"
+                disabled={bulkFillBusy || priceRefreshBusy || consensusBusy || companiesBusy}
                 onClick={async () => {
                   const q = qInput.trim();
+                  const qLabel = q || "전체";
+                  clearActivityTimer();
+                  setBulkFillMode("price");
+                  setActivityBanner(`${qLabel} 현재가 모두 채우기: 요청 보내는 중…`);
                   setStatusHtml(`<strong>${q || "전체"}</strong> 현재가 모두 채우기 시작… (백그라운드)`);
                   try {
                     const start = (await postJson(`/api/admin/fill_price?q=${encodeURIComponent(q)}&limit=2000`)) as {
                       job_id: string;
                       requested: number;
                     };
-                    const qLabel = q || "전체";
                     setStatusHtml(
                       `<strong>${qLabel}</strong> 현재가를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
                     );
+                    setActivityBanner(`${qLabel} 현재가 모두 채우기: 진행 중… (0/${start.requested})`);
                     void startFillPoll("현재가 모두 채우기", qLabel)(start.job_id);
                   } catch (e) {
+                    setBulkFillMode(null);
+                    setActivityBanner(null);
                     setStatusHtml(
                       `<strong>${q || "전체"}</strong> 현재가 모두 채우기 시작 실패: ${e instanceof Error ? e.message : String(e)}`
                     );
                   }
                 }}
               >
-                현재가 모두 채우기
+                {bulkFillMode === "price" ? "처리 중…" : "현재가 모두 채우기"}
               </button>
               <button
                 type="button"
                 className="secondary"
+                disabled={bulkFillBusy || priceRefreshBusy || consensusBusy || companiesBusy}
                 onClick={async () => {
                   const q = qInput.trim();
+                  const qLabel = q || "전체";
+                  clearActivityTimer();
+                  setBulkFillMode("consensus");
+                  setActivityBanner(`${qLabel} 컨센서스 모두 채우기: 요청 보내는 중…`);
                   setStatusHtml(`<strong>${q || "전체"}</strong> 컨센서스 모두 채우기 시작… (백그라운드)`);
                   try {
                     const start = (await postJson(
                       `/api/admin/fill_consensus?q=${encodeURIComponent(q)}&limit=2000&only_missing=true&primary_year=${encodeURIComponent(baseYear)}`
                     )) as { job_id: string; requested: number };
-                    const qLabel = q || "전체";
                     setStatusHtml(
                       `<strong>${qLabel}</strong> 컨센서스를 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
                     );
+                    setActivityBanner(`${qLabel} 컨센서스 모두 채우기: 진행 중… (0/${start.requested})`);
                     void startFillPoll("컨센서스 모두 채우기", qLabel)(start.job_id);
                   } catch (e) {
+                    setBulkFillMode(null);
+                    setActivityBanner(null);
                     setStatusHtml(
                       `<strong>${q || "전체"}</strong> 컨센서스 모두 채우기 시작 실패: ${e instanceof Error ? e.message : String(e)}`
                     );
                   }
                 }}
               >
-                컨센서스 모두 채우기
+                {bulkFillMode === "consensus" ? "처리 중…" : "컨센서스 모두 채우기"}
               </button>
               <button
                 type="button"
                 className="secondary"
+                disabled={bulkFillBusy || priceRefreshBusy || consensusBusy || companiesBusy}
                 onClick={async () => {
                   const q = qInput.trim();
+                  const qLabel = q || "전체";
+                  clearActivityTimer();
+                  setBulkFillMode("all");
+                  setActivityBanner(`${qLabel} 전체 채우기: 요청 보내는 중…`);
                   setStatusHtml(`<strong>${q || "전체"}</strong> 값 채우기 시작… (백그라운드)`);
                   try {
                     const start = (await postJson(
                       `/api/admin/fill?q=${encodeURIComponent(q)}&limit=2000&only_missing=true`
                     )) as { job_id: string; requested: number };
-                    const qLabel = q || "전체";
                     setStatusHtml(
                       `<strong>${qLabel}</strong> 값을 불러오기 시작했어요 · 대상 ${start.requested}개 · 진행 상황을 확인하는 중…`
                     );
+                    setActivityBanner(`${qLabel} 전체 채우기: 진행 중… (0/${start.requested})`);
                     void startFillPoll("채우기", qLabel)(start.job_id);
                   } catch (e) {
+                    setBulkFillMode(null);
+                    setActivityBanner(null);
                     setStatusHtml(`<strong>${q || "전체"}</strong> 채우기 시작 실패: ${e instanceof Error ? e.message : String(e)}`);
                   }
                 }}
               >
-                전체 채우기
+                {bulkFillMode === "all" ? "처리 중…" : "전체 채우기"}
               </button>
               <div className="sep" />
               <button
                 type="button"
                 className="secondary"
+                disabled={bulkFillBusy || priceRefreshBusy || consensusBusy || companiesBusy}
                 onClick={async () => {
+                  clearActivityTimer();
+                  setCompaniesBusy(true);
+                  setActivityBanner("상장사목록 갱신 중…");
                   setStatusHtml("<strong>상장사목록</strong> 갱신 중…");
                   try {
                     const r = (await postJson("/api/admin/refresh/companies")) as {
@@ -664,10 +778,13 @@ export default function App() {
                     await load();
                   } catch (e) {
                     setStatusHtml(`<strong>상장사목록</strong> 갱신 실패: ${e instanceof Error ? e.message : String(e)}`);
+                  } finally {
+                    setCompaniesBusy(false);
+                    setActivityBanner(null);
                   }
                 }}
               >
-                상장사목록 갱신
+                {companiesBusy ? "갱신 중…" : "상장사목록 갱신"}
               </button>
             </div>
             <div className="foot">
